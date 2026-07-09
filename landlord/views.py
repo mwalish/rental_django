@@ -5,6 +5,10 @@ from rest_framework import status
 from django.db.models import Count, Sum, Q
 from datetime import datetime
 
+
+# from .models import Lease, Property
+# from .serializers import LeaseSerializer
+
 # Import shared models and serializers from core
 from core.models import Landlord, Property, RentalRequest, Meeting, Lease, Payment
 from core.serializers import (
@@ -17,9 +21,9 @@ from core.serializers import (
 )
 
 
-# --------------------------
+# -----------------------------------------------------
 # Helper: Verify logged-in user is a valid Landlord
-# --------------------------
+# -----------------------------------------------------
 def get_valid_landlord(user):
     if not user.is_authenticated or user.role != "landlord":
         return None
@@ -28,6 +32,7 @@ def get_valid_landlord(user):
     except Landlord.DoesNotExist:
         return None
 @api_view(["GET"])
+
 @permission_classes([IsAuthenticated])
 def dashboard(request):
     landlord = get_valid_landlord(request.user)
@@ -247,3 +252,102 @@ def payments(request):
     payments = Payment.objects.filter(lease__property__landlord=landlord)
     serializer = PaymentSerializer(payments, many=True)
     return Response(serializer.data)
+
+
+# ------------------------------
+# LEASE MODULE VIEWS
+# ------------------------------
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def lease_list_create(request):
+    user = request.user
+
+    # Create new lease
+    if request.method == 'POST':
+        if user.role not in ['admin', 'landlord']:
+            return Response({"error": "Only admins and landlords can create leases."}, status=403)
+
+        serializer = LeaseSerializer(data=request.data)
+        if serializer.is_valid():
+            property_obj = serializer.validated_data['property']
+            # Landlord can only use their own property
+            if user.role == 'landlord' and property_obj.landlord != user.landlord_profile:
+                return Response({"error": "You can only create leases for your own properties."}, status=403)
+
+            # Save — your model will auto-fill monthly_rent
+            lease = serializer.save()
+
+            # Update property status
+            if lease.status == "ACTIVE":
+                property_obj.status = "OCCUPIED"
+                property_obj.save(update_fields=['status'])
+
+            return Response({
+                "message": "Lease created successfully",
+                "lease": serializer.data
+            }, status=201)
+        return Response({"error": serializer.errors}, status=400)
+
+    # List leases filtered by role
+    if user.role == 'admin':
+        leases = Lease.objects.all().order_by('-created_at')
+    elif user.role == 'landlord':
+        leases = Lease.objects.filter(property__landlord=user.landlord_profile).order_by('-created_at')
+    elif user.role == 'tenant':
+        leases = Lease.objects.filter(tenant=user.tenant).order_by('-created_at')
+    else:
+        leases = Lease.objects.none()
+
+    serializer = LeaseSerializer(leases, many=True)
+    return Response({"leases": serializer.data})
+
+
+@api_view(['GET', 'PUT', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def lease_detail(request, lease_id):
+    user = request.user
+
+    try:
+        lease = Lease.objects.get(id=lease_id)
+    except Lease.DoesNotExist:
+        return Response({"error": "Lease not found."}, status=404)
+
+    # Access control
+    if user.role == 'landlord' and lease.property.landlord != user.landlord_profile:
+        return Response({"error": "You can only access leases for your own properties."}, status=403)
+    if user.role == 'tenant' and lease.tenant != user.tenant:
+        return Response({"error": "You can only view your own lease."}, status=403)
+
+    # Get single lease
+    if request.method == 'GET':
+        serializer = LeaseSerializer(lease)
+        return Response({"lease": serializer.data})
+
+    # Update lease
+    if request.method == 'PUT':
+        if user.role == 'tenant':
+            return Response({"error": "Tenants cannot edit leases."}, status=403)
+
+        serializer = LeaseSerializer(lease, data=request.data, partial=True)
+        if serializer.is_valid():
+            updated_lease = serializer.save()
+            # Sync property status
+            if updated_lease.status == "ACTIVE":
+                updated_lease.property.status = "OCCUPIED"
+            else:
+                updated_lease.property.status = "AVAILABLE"
+            updated_lease.property.save(update_fields=['status'])
+            return Response({
+                "message": "Lease updated successfully",
+                "lease": serializer.data
+            })
+        return Response({"error": serializer.errors}, status=400)
+
+    # Delete lease
+    if request.method == 'DELETE':
+        if user.role not in ['admin', 'landlord']:
+            return Response({"error": "Only admins and landlords can delete leases."}, status=403)
+        lease.property.status = "AVAILABLE"
+        lease.property.save(update_fields=['status'])
+        lease.delete()
+        return Response({"message": "Lease deleted successfully."})

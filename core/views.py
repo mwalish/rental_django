@@ -6,8 +6,10 @@ from django.db import transaction, IntegrityError
 from django.contrib.auth import get_user_model, authenticate
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from .models import Landlord, Tenant
+from .models import Landlord, Lease, Tenant, Property
+
 from .serializers import (
+    LeaseSerializer,
     UserRegistrationSerializer,
     UserSerializer,
     LandlordProfileSerializer,
@@ -163,3 +165,138 @@ def ProfileView(request):
         return Response({"message": "Profile updated successfully", "profile": serializer.data})
     
     return Response({"error": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+# ------------------------------
+# LEASE VIEWS
+# ------------------------------
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def lease_list_create(request):
+    user = request.user
+
+    # Create new lease
+    if request.method == 'POST':
+        if user.role not in ['admin', 'landlord']:
+            return Response(
+                {"error": "Only admins and landlords can create leases."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        serializer = LeaseSerializer(data=request.data)
+        if serializer.is_valid():
+            property_obj = serializer.validated_data['property']
+
+            # Landlord can only use their own property
+            if user.role == 'landlord' and property_obj.landlord != user.landlord_profile:
+                return Response(
+                    {"error": "You can only create leases for your own properties."},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+            # Save lease — your model will auto-fill monthly_rent
+            lease = serializer.save()
+
+            # Update property status
+            if lease.status == "ACTIVE":
+                property_obj.status = "OCCUPIED"
+                property_obj.save(update_fields=['status'])
+
+            return Response(
+                {
+                    "message": "Lease created successfully",
+                    "lease": serializer.data
+                },
+                status=status.HTTP_201_CREATED
+            )
+
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    # List leases filtered by user role
+    if user.role == 'admin':
+        leases = Lease.objects.all().order_by('-created_at')
+    elif user.role == 'landlord':
+        leases = Lease.objects.filter(property__landlord=user.landlord_profile).order_by('-created_at')
+    elif user.role == 'tenant':
+        leases = Lease.objects.filter(tenant=user.tenant).order_by('-created_at')
+    else:
+        leases = Lease.objects.none()
+
+    serializer = LeaseSerializer(leases, many=True)
+    return Response({"leases": serializer.data}, status=status.HTTP_200_OK)
+
+
+@api_view(['GET', 'PUT', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def lease_detail(request, lease_id):
+    user = request.user
+
+    try:
+        lease = Lease.objects.get(id=lease_id)
+    except Lease.DoesNotExist:
+        return Response(
+            {"error": "Lease not found."},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+    # Access control
+    if user.role == 'landlord' and lease.property.landlord != user.landlord_profile:
+        return Response(
+            {"error": "You can only access leases for your own properties."},
+            status=status.HTTP_403_FORBIDDEN
+        )
+    if user.role == 'tenant' and lease.tenant != user.tenant:
+        return Response(
+            {"error": "You can only view your own lease."},
+            status=status.HTTP_403_FORBIDDEN
+        )
+
+    # Get single lease
+    if request.method == 'GET':
+        serializer = LeaseSerializer(lease)
+        return Response({"lease": serializer.data}, status=status.HTTP_200_OK)
+
+    # Update lease
+    if request.method == 'PUT':
+        if user.role == 'tenant':
+            return Response(
+                {"error": "Tenants cannot edit leases."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        serializer = LeaseSerializer(lease, data=request.data, partial=True)
+        if serializer.is_valid():
+            updated_lease = serializer.save()
+            # Sync property status
+            if updated_lease.status == "ACTIVE":
+                updated_lease.property.status = "OCCUPIED"
+            else:
+                updated_lease.property.status = "AVAILABLE"
+            updated_lease.property.save(update_fields=['status'])
+
+            return Response(
+                {
+                    "message": "Lease updated successfully",
+                    "lease": serializer.data
+                },
+                status=status.HTTP_200_OK
+            )
+
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    # Delete lease
+    if request.method == 'DELETE':
+        if user.role not in ['admin', 'landlord']:
+            return Response(
+                {"error": "Only admins and landlords can delete leases."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        # Set property back to available
+        lease.property.status = "AVAILABLE"
+        lease.property.save(update_fields=['status'])
+        lease.delete()
+
+        return Response(
+            {"message": "Lease deleted successfully."},
+            status=status.HTTP_200_OK
+        )

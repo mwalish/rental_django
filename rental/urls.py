@@ -23,6 +23,8 @@ urlpatterns = [
     path("admin/", admin.site.urls),
     path("api/core/", include("core.urls")),
     path("api/landlord/", include("landlord.urls")),
+    
+    
 ]
 
 if settings.DEBUG:

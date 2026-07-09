@@ -103,3 +103,17 @@ class UserSerializer(serializers.ModelSerializer):
         model = User
         fields = ['id', 'email', 'username', 'phone_number', 'role', 'date_joined']
         read_only_fields = ['id', 'date_joined']
+class LeaseSerializer(serializers.ModelSerializer):
+    property_title = serializers.CharField(source='property.title', read_only=True)
+    tenant_name = serializers.CharField(source='tenant.full_name', read_only=True)
+    landlord_name = serializers.CharField(source='property.landlord.full_name', read_only=True)
+
+    class Meta:
+        model = Lease
+        fields = "__all__"
+        read_only_fields = ["id", "created_at", "updated_at", "property_title", "tenant_name", "landlord_name"]
+
+    def validate(self, data):
+        if data.get('end_date') and data.get('start_date') and data['end_date'] <= data['start_date']:
+            raise serializers.ValidationError({"end_date": "End date must be later than start date."})
+        return data
