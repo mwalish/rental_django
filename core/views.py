@@ -6,10 +6,11 @@ from django.db import transaction, IntegrityError
 from django.contrib.auth import get_user_model, authenticate
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from .models import Landlord, Lease, Tenant, Property
+from .models import Landlord, Lease, Tenant, Property,Notice #notice 
 
 from .serializers import (
     LeaseSerializer,
+    NoticeSerializer,
     UserRegistrationSerializer,
     UserSerializer,
     LandlordProfileSerializer,
@@ -298,5 +299,112 @@ def lease_detail(request, lease_id):
 
         return Response(
             {"message": "Lease deleted successfully."},
+            status=status.HTTP_200_OK
+        )
+    
+    #start td
+    # ------------------------------
+# NOTICE VIEWS
+# ------------------------------
+from .models import Notice  # Add this line if not already imported
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def notice_list_create(request):
+    user = request.user
+
+    # --- Create new notice ---
+    if request.method == 'POST':
+        # Only Admin and Landlord can create notices
+        if user.role not in ['admin', 'landlord']:
+            return Response(
+                {"error": "Only admins and landlords can create notices."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        serializer = NoticeSerializer(data=request.data)
+        if serializer.is_valid():
+            # Auto-set creator to current logged-in user
+            serializer.save(created_by=user)
+            return Response(
+                {
+                    "message": "Notice created successfully",
+                    "notice": serializer.data
+                },
+                status=status.HTTP_201_CREATED
+            )
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    # --- List notices ---
+    if user.role == 'admin':
+        # Admin sees all notices
+        notices = Notice.objects.all().order_by('-created_at')
+    elif user.role == 'landlord':
+        # Landlord sees only notices they created
+        notices = Notice.objects.filter(created_by=user).order_by('-created_at')
+    elif user.role == 'tenant':
+        # Tenant sees only notices targeted to ALL
+        notices = Notice.objects.filter(target='ALL').order_by('-created_at')
+    else:
+        notices = Notice.objects.none()
+
+    serializer = NoticeSerializer(notices, many=True)
+    return Response({"notices": serializer.data}, status=status.HTTP_200_OK)
+
+
+@api_view(['GET', 'PUT', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def notice_detail(request, notice_id):
+    user = request.user
+
+    try:
+        notice = Notice.objects.get(id=notice_id)
+    except Notice.DoesNotExist:
+        return Response(
+            {"error": "Notice not found."},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+    # --- Access control ---
+    if user.role == 'tenant':
+        # Tenants can only view, not edit/delete
+        if request.method != 'GET':
+            return Response(
+                {"error": "Tenants cannot modify or delete notices."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+    elif user.role == 'landlord':
+        # Landlords can only edit/delete their own notices
+        if notice.created_by != user:
+            return Response(
+                {"error": "You can only manage notices you created."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+    # --- Get single notice ---
+    if request.method == 'GET':
+        serializer = NoticeSerializer(notice)
+        return Response({"notice": serializer.data}, status=status.HTTP_200_OK)
+
+    # --- Update notice ---
+    if request.method == 'PUT':
+        serializer = NoticeSerializer(notice, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(
+                {
+                    "message": "Notice updated successfully",
+                    "notice": serializer.data
+                },
+                status=status.HTTP_200_OK
+            )
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    # --- Delete notice ---
+    if request.method == 'DELETE':
+        notice.delete()
+        return Response(
+            {"message": "Notice deleted successfully."},
             status=status.HTTP_200_OK
         )

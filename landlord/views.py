@@ -84,6 +84,7 @@ def dashboard(request):
             "total_income_received": float(total_income),
             "current_month_income": float(monthly_income)
         },
+        # not a must
         "quick_links": {
             "properties": "/api/landlord/properties/",
             "requests": "/api/landlord/rental-requests/",

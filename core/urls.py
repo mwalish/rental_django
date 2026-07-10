@@ -13,4 +13,8 @@ urlpatterns = [
     path('leases/', views.lease_list_create, name='lease_list_create'),
     path('leases/<int:lease_id>/', views.lease_detail, name='lease_detail'),
 
+    # --- NOTICE ROUTES ---
+    path('notices/', views.notice_list_create, name='notice_list_create'),
+    path('notices/<int:notice_id>/', views.notice_detail, name='notice_detail'),
+
 ]

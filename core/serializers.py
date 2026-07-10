@@ -117,3 +117,18 @@ class LeaseSerializer(serializers.ModelSerializer):
         if data.get('end_date') and data.get('start_date') and data['end_date'] <= data['start_date']:
             raise serializers.ValidationError({"end_date": "End date must be later than start date."})
         return data
+#start 
+# ------------------------------
+# NOTICE SERIALIZER
+# ------------------------------
+class NoticeSerializer(serializers.ModelSerializer):
+    created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True)
+    created_by_role = serializers.CharField(source='created_by.role', read_only=True)
+
+    class Meta:
+        model = Notice
+        fields = "__all__"
+        read_only_fields = [
+            "id", "created_by", "created_at", "updated_at",
+            "created_by_name", "created_by_role"
+        ]
