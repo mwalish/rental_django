@@ -6,12 +6,13 @@ from django.db import transaction, IntegrityError
 from django.contrib.auth import get_user_model, authenticate
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from .models import Landlord, Lease, Tenant, Property,Notice , Maintenance #notice 
+from .models import Landlord, Lease, Payment, Tenant, Property,Notice , Maintenance #notice 
 
 from .serializers import (
     LeaseSerializer,
     MaintenanceSerializer,
     NoticeSerializer,
+    PaymentSerializer,
     UserRegistrationSerializer,
     UserSerializer,
     LandlordProfileSerializer,
@@ -524,3 +525,175 @@ def maintenance_detail(request, maintenance_id):
             {"message": "Maintenance request deleted successfully."},
             status=status.HTTP_200_OK
         )   
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def payment_list_create(request):
+    """
+    GET  - List payments with filters, totals and balance summary
+    POST - Create new payment (only for tenants)
+    """
+    user = request.user
+
+    # --------------------------
+    # CREATE NEW PAYMENT
+    # --------------------------
+    if request.method == 'POST':
+        # Only tenants can submit payments
+        if user.role != 'tenant':
+            return Response(
+                {"error": "Only tenants can submit payments."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        # Make sure tenant profile exists
+        if not hasattr(user, 'tenant') or user.tenant is None:
+            return Response(
+                {"error": "Tenant profile not found."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Validate input data
+        serializer = PaymentSerializer(data=request.data)
+        if serializer.is_valid():
+            lease = serializer.validated_data['lease']
+
+            # Security check: only allow payments for the tenant's own active lease
+            if lease.tenant_id != user.tenant.id:
+                return Response(
+                    {"error": "You can only make payments for your own active leases."},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+            if lease.status != "ACTIVE":
+                return Response(
+                    {"error": "You can only pay for active leases."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # Save payment record
+            payment = serializer.save()
+            return Response(
+                {
+                    "message": "Payment submitted successfully, awaiting verification.",
+                    "payment": PaymentSerializer(payment, context={'request': request}).data
+                },
+                status=status.HTTP_201_CREATED
+            )
+
+        # Return errors if data is invalid
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+    # --------------------------
+    # LIST PAYMENTS + FILTERS + SUMMARY
+    # --------------------------
+    if request.method == 'GET':
+        # Base query: show only what the user is allowed to see
+        if user.role == 'admin':
+            payments = Payment.objects.all().select_related('lease', 'lease__tenant', 'lease__property')
+        elif user.role == 'landlord':
+            payments = Payment.objects.filter(lease__property__landlord=user.landlord_profile).select_related('lease', 'lease__tenant', 'lease__property')
+        elif user.role == 'tenant':
+            payments = Payment.objects.filter(lease__tenant=user.tenant).select_related('lease', 'lease__tenant', 'lease__property')
+        else:
+            payments = Payment.objects.none()
+
+        # --------------------------
+        # APPLY FILTERS
+        # --------------------------
+        status_filter = request.query_params.get('status')   # e.g. ?status=pending
+        lease_id = request.query_params.get('lease_id')     # e.g. ?lease_id=4
+        tenant_id = request.query_params.get('tenant_id')   # e.g. ?tenant_id=3
+
+        if status_filter:
+            payments = payments.filter(status=status_filter.lower())
+        if lease_id:
+            payments = payments.filter(lease_id=lease_id)
+        # Only admins/landlords can filter by tenant
+        if tenant_id and user.role in ['admin', 'landlord']:
+            payments = payments.filter(lease__tenant_id=tenant_id)
+
+        # --------------------------
+        # CALCULATE TOTALS & BALANCE
+        # --------------------------
+        total_paid = sum(p.amount for p in payments.filter(status='completed'))
+        total_pending = sum(p.amount for p in payments.filter(status='pending'))
+
+        # Get monthly rent amount from the lease
+        monthly_rent = payments.first().lease.monthly_rent if payments.exists() else 0
+
+        # Calculate balance: how much more is still due
+        balance_due = max(0, monthly_rent - total_paid)
+
+        # --------------------------
+        # SEND RESPONSE
+        # --------------------------
+        serializer = PaymentSerializer(payments, many=True, context={'request': request})
+
+        return Response({
+            "summary": {
+                "monthly_rent": f"{monthly_rent:.2f}",
+                "total_paid": f"{total_paid:.2f}",
+                "total_pending": f"{total_pending:.2f}",
+                "balance_due": f"{balance_due:.2f}"
+            },
+            "payments": serializer.data
+        })
+
+
+@api_view(['GET', 'PUT', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def payment_detail(request, payment_id):
+    """
+    GET    - View single payment details
+    PUT    - Update payment (only landlord/admin can approve/change status)
+    DELETE - Remove payment record
+    """
+    try:
+        payment = Payment.objects.get(id=payment_id)
+    except Payment.DoesNotExist:
+        return Response({"error": "Payment not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    # --------------------------
+    # ACCESS CONTROL
+    # --------------------------
+    if request.user.role == 'tenant':
+        # Tenants can only view their own payments
+        if payment.lease.tenant != request.user.tenant:
+            return Response({"error": "Access denied."}, status=status.HTTP_403_FORBIDDEN)
+        # Tenants cannot update or delete
+        if request.method in ['PUT', 'DELETE']:
+            return Response({"error": "Only landlords/admins can update payments."}, status=status.HTTP_403_FORBIDDEN)
+
+    elif request.user.role == 'landlord':
+        # Landlords only manage payments for their own properties
+        if payment.lease.property.landlord != request.user.landlord_profile:
+            return Response({"error": "Access denied."}, status=status.HTTP_403_FORBIDDEN)
+
+    # --------------------------
+    # GET SINGLE PAYMENT
+    # --------------------------
+    if request.method == 'GET':
+        serializer = PaymentSerializer(payment, context={'request': request})
+        return Response({"payment": serializer.data})
+
+    # --------------------------
+    # UPDATE / APPROVE PAYMENT
+    # --------------------------
+    if request.method == 'PUT':
+        serializer = PaymentSerializer(payment, data=request.data, partial=True, context={'request': request})
+        if serializer.is_valid():
+            serializer.save()
+            return Response({
+                "message": "Payment updated successfully.",
+                "payment": serializer.data
+            })
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    # --------------------------
+    # DELETE PAYMENT
+    # --------------------------
+    if request.method == 'DELETE':
+        if request.user.role not in ['admin', 'landlord']:
+            return Response({"error": "Only admins can delete payments."}, status=status.HTTP_403_FORBIDDEN)
+        payment.delete()
+        return Response({"message": "Payment deleted."})

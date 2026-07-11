@@ -21,4 +21,10 @@ urlpatterns = [
     path('maintenance/', views.maintenance_list_create, name='maintenance_list_create'),
     path('maintenance/<int:maintenance_id>/', views.maintenance_detail, name='maintenance_detail'),
 
+  
+
+    # --- PAYMENT ROUTES ---
+    path('payments/', views.payment_list_create, name='payment_list_create'),
+    path('payments/<int:payment_id>/', views.payment_detail, name='payment_detail'),
 ]
+

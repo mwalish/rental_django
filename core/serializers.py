@@ -149,3 +149,29 @@ class MaintenanceSerializer(serializers.ModelSerializer):
             "id", "tenant", "created_at", "updated_at",
             "property_title", "tenant_name", "landlord_name"
         ]
+        
+class PaymentSerializer(serializers.ModelSerializer):
+    """
+    Converts Payment model data to JSON and validates input
+    """
+    # Read-only fields: taken from related models
+    property_title = serializers.CharField(source='lease.property.title', read_only=True)
+    tenant_name = serializers.CharField(source='lease.tenant.full_name', read_only=True)
+    landlord_name = serializers.CharField(source='lease.property.landlord.full_name', read_only=True)
+    lease_monthly_rent = serializers.DecimalField(source='lease.monthly_rent', max_digits=12, decimal_places=2, read_only=True)
+
+    class Meta:
+        model = Payment
+        # Include all fields
+        fields = "__all__"
+        # Fields that users cannot edit directly
+        read_only_fields = [
+            "id", "payment_date", "created_at", "updated_at",
+            "property_title", "tenant_name", "landlord_name", "lease_monthly_rent"
+        ]
+
+    # Custom validation: make sure amount is positive
+    def validate_amount(self, value):
+        if value <= 0:
+            raise serializers.ValidationError("Amount must be greater than zero.")
+        return value
