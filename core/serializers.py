@@ -132,3 +132,20 @@ class NoticeSerializer(serializers.ModelSerializer):
             "id", "created_by", "created_at", "updated_at",
             "created_by_name", "created_by_role"
         ]
+
+# ------------------------------
+# MAINTENANCE SERIALIZER
+# ------------------------------
+class MaintenanceSerializer(serializers.ModelSerializer):
+    # Add readable names for responses
+    property_title = serializers.CharField(source='property.title', read_only=True)
+    tenant_name = serializers.CharField(source='tenant.full_name', read_only=True)
+    landlord_name = serializers.CharField(source='property.landlord.full_name', read_only=True)
+
+    class Meta:
+        model = Maintenance
+        fields = "__all__"
+        read_only_fields = [
+            "id", "tenant", "created_at", "updated_at",
+            "property_title", "tenant_name", "landlord_name"
+        ]

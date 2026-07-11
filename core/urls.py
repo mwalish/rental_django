@@ -17,4 +17,8 @@ urlpatterns = [
     path('notices/', views.notice_list_create, name='notice_list_create'),
     path('notices/<int:notice_id>/', views.notice_detail, name='notice_detail'),
 
+    # --- MAINTENANCE ROUTES ---
+    path('maintenance/', views.maintenance_list_create, name='maintenance_list_create'),
+    path('maintenance/<int:maintenance_id>/', views.maintenance_detail, name='maintenance_detail'),
+
 ]

@@ -6,10 +6,11 @@ from django.db import transaction, IntegrityError
 from django.contrib.auth import get_user_model, authenticate
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from .models import Landlord, Lease, Tenant, Property,Notice #notice 
+from .models import Landlord, Lease, Tenant, Property,Notice , Maintenance #notice 
 
 from .serializers import (
     LeaseSerializer,
+    MaintenanceSerializer,
     NoticeSerializer,
     UserRegistrationSerializer,
     UserSerializer,
@@ -408,3 +409,118 @@ def notice_detail(request, notice_id):
             {"message": "Notice deleted successfully."},
             status=status.HTTP_200_OK
         )
+    
+ # ------------------------------
+# MAINTENANCE VIEWS
+# ------------------------------
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def maintenance_list_create(request):
+    user = request.user
+
+    # --- Create new maintenance request ---
+    if request.method == 'POST':
+        # Only tenants can submit maintenance requests
+        if user.role != 'tenant':
+            return Response(
+                {"error": "Only tenants can submit maintenance requests."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        serializer = MaintenanceSerializer(data=request.data)
+        if serializer.is_valid():
+            # Auto-link to current tenant
+            serializer.save(tenant=user.tenant)
+            return Response(
+                {
+                    "message": "Maintenance request submitted successfully",
+                    "maintenance": serializer.data
+                },
+                status=status.HTTP_201_CREATED
+            )
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    # --- List maintenance requests ---
+    if user.role == 'admin':
+        # Admin sees all requests
+        requests = Maintenance.objects.all().order_by('-created_at')
+    elif user.role == 'landlord':
+        # Landlord sees only requests for their own properties
+        requests = Maintenance.objects.filter(property__landlord=user.landlord_profile).order_by('-created_at')
+    elif user.role == 'tenant':
+        # Tenant sees only their own requests
+        requests = Maintenance.objects.filter(tenant=user.tenant).order_by('-created_at')
+    else:
+        requests = Maintenance.objects.none()
+
+    serializer = MaintenanceSerializer(requests, many=True)
+    return Response({"maintenance_requests": serializer.data}, status=status.HTTP_200_OK)
+
+
+@api_view(['GET', 'PUT', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def maintenance_detail(request, maintenance_id):
+    user = request.user
+
+    try:
+        req = Maintenance.objects.get(id=maintenance_id)
+    except Maintenance.DoesNotExist:
+        return Response(
+            {"error": "Maintenance request not found."},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+    # --- Access control ---
+    if user.role == 'tenant':
+        # Tenant can only view/update their own requests, can't delete
+        if req.tenant != user.tenant:
+            return Response(
+                {"error": "You can only access your own maintenance requests."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        if request.method == 'DELETE':
+            return Response(
+                {"error": "Tenants cannot delete maintenance requests."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+    elif user.role == 'landlord':
+        # Landlord can only manage requests for their own properties
+        if req.property.landlord != user.landlord_profile:
+            return Response(
+                {"error": "You can only manage requests for your own properties."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+    # --- Get single request ---
+    if request.method == 'GET':
+        serializer = MaintenanceSerializer(req)
+        return Response({"maintenance": serializer.data}, status=status.HTTP_200_OK)
+
+    # --- Update request (change status, edit details) ---
+    if request.method == 'PUT':
+        serializer = MaintenanceSerializer(req, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(
+                {
+                    "message": "Maintenance request updated successfully",
+                    "maintenance": serializer.data
+                },
+                status=status.HTTP_200_OK
+            )
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    # --- Delete request ---
+    if request.method == 'DELETE':
+        if user.role not in ['admin', 'landlord']:
+            return Response(
+                {"error": "Only admins and landlords can delete requests."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        req.delete()
+        return Response(
+            {"message": "Maintenance request deleted successfully."},
+            status=status.HTTP_200_OK
+        )   
