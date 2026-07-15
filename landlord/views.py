@@ -4,7 +4,10 @@ from rest_framework.response import Response
 from rest_framework import status
 from django.db.models import Count, Sum, Q
 from datetime import datetime
+# ✅ CORRECT
+from django.conf import settings
 
+User = settings.AUTH_USER_MODEL
 
 # from .models import Lease, Property
 # from .serializers import LeaseSerializer

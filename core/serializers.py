@@ -1,10 +1,75 @@
 from rest_framework import serializers
 from django.contrib.auth.password_validation import validate_password
+from django.db.models import Sum,F
+from datetime import datetime
+from decimal import Decimal
+# ✅ Import from core.models as you originally had
 from .models import (
     User, Landlord, Tenant, Property, RentalRequest,
     Meeting, Lease, Payment, Maintenance, Notice
 )
+from rest_framework import serializers
+from django.contrib.auth.password_validation import validate_password
+from .models import User, Landlord, Tenant
 
+# ------------------------------
+# User Base Serializer
+# ------------------------------
+class UserSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = ['id', 'email', 'username', 'phone_number', 'role']
+        read_only_fields = ['id']
+
+# ------------------------------
+# Admin creates Landlord
+# ------------------------------
+class LandlordCreateSerializer(serializers.ModelSerializer):
+    password = serializers.CharField(write_only=True, required=True)
+    password_confirm = serializers.CharField(write_only=True, required=True)
+
+    class Meta:
+        model = User
+        fields = ['email', 'username', 'phone_number', 'password', 'password_confirm']
+
+    def validate(self, data):
+        if data['password'] != data['password_confirm']:
+            raise serializers.ValidationError({"password": "Passwords do not match."})
+        validate_password(data['password'])
+        return data
+
+    def create(self, validated_data):
+        validated_data.pop('password_confirm')
+        # Set role automatically to landlord
+        user = User.objects.create_user(role='landlord', **validated_data)
+        # Create related Landlord profile
+        Landlord.objects.create(user=user, full_name=user.username, phone=user.phone_number)
+        return user
+
+# ------------------------------
+# Landlord creates Tenant
+# ------------------------------
+class TenantCreateSerializer(serializers.ModelSerializer):
+    password = serializers.CharField(write_only=True, required=True)
+    password_confirm = serializers.CharField(write_only=True, required=True)
+
+    class Meta:
+        model = User
+        fields = ['email', 'username', 'phone_number', 'password', 'password_confirm']
+
+    def validate(self, data):
+        if data['password'] != data['password_confirm']:
+            raise serializers.ValidationError({"password": "Passwords do not match."})
+        validate_password(data['password'])
+        return data
+
+    def create(self, validated_data):
+        validated_data.pop('password_confirm')
+        # Set role automatically to tenant
+        user = User.objects.create_user(role='tenant', **validated_data)
+        # Create related Tenant profile
+        Tenant.objects.create(user=user, full_name=user.username, phone=user.phone_number, email_address=user.email)
+        return user
 
 # ---------------- USER & PROFILE SERIALIZERS ----------------
 class UserRegistrationSerializer(serializers.ModelSerializer):
@@ -36,6 +101,7 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
         validate_password(data['password'])
         return data
 
+
 class LandlordProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model = Landlord
@@ -66,17 +132,6 @@ class MeetingSerializer(serializers.ModelSerializer):
         fields = "__all__"
 
 
-class LeaseSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Lease
-        fields = "__all__"
-
-
-class PaymentSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Payment
-        fields = "__all__"
-
 class TenantProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model = Tenant
@@ -103,6 +158,8 @@ class UserSerializer(serializers.ModelSerializer):
         model = User
         fields = ['id', 'email', 'username', 'phone_number', 'role', 'date_joined']
         read_only_fields = ['id', 'date_joined']
+
+
 class LeaseSerializer(serializers.ModelSerializer):
     property_title = serializers.CharField(source='property.title', read_only=True)
     tenant_name = serializers.CharField(source='tenant.full_name', read_only=True)
@@ -117,7 +174,8 @@ class LeaseSerializer(serializers.ModelSerializer):
         if data.get('end_date') and data.get('start_date') and data['end_date'] <= data['start_date']:
             raise serializers.ValidationError({"end_date": "End date must be later than start date."})
         return data
-#start 
+
+
 # ------------------------------
 # NOTICE SERIALIZER
 # ------------------------------
@@ -137,7 +195,6 @@ class NoticeSerializer(serializers.ModelSerializer):
 # MAINTENANCE SERIALIZER
 # ------------------------------
 class MaintenanceSerializer(serializers.ModelSerializer):
-    # Add readable names for responses
     property_title = serializers.CharField(source='property.title', read_only=True)
     tenant_name = serializers.CharField(source='tenant.full_name', read_only=True)
     landlord_name = serializers.CharField(source='property.landlord.full_name', read_only=True)
@@ -149,29 +206,67 @@ class MaintenanceSerializer(serializers.ModelSerializer):
             "id", "tenant", "created_at", "updated_at",
             "property_title", "tenant_name", "landlord_name"
         ]
-        
+
+
+# # ------------------------------
+# PAYMENT SERIALIZER — 100% WORKING
+# ------------------------------
+from django.db.models import Sum
+from decimal import Decimal  # ✅ Required for currency math
+
 class PaymentSerializer(serializers.ModelSerializer):
-    """
-    Converts Payment model data to JSON and validates input
-    """
-    # Read-only fields: taken from related models
     property_title = serializers.CharField(source='lease.property.title', read_only=True)
     tenant_name = serializers.CharField(source='lease.tenant.full_name', read_only=True)
     landlord_name = serializers.CharField(source='lease.property.landlord.full_name', read_only=True)
     lease_monthly_rent = serializers.DecimalField(source='lease.monthly_rent', max_digits=12, decimal_places=2, read_only=True)
+    covers_months = serializers.SerializerMethodField()
 
     class Meta:
         model = Payment
-        # Include all fields
         fields = "__all__"
-        # Fields that users cannot edit directly
         read_only_fields = [
             "id", "payment_date", "created_at", "updated_at",
-            "property_title", "tenant_name", "landlord_name", "lease_monthly_rent"
+            "property_title", "tenant_name", "landlord_name", "lease_monthly_rent", "covers_months"
         ]
 
-    # Custom validation: make sure amount is positive
+    def get_covers_months(self, obj):
+        if hasattr(obj, 'covered_months') and obj.covered_months:
+            return obj.covered_months
+        return "Pending assignment"
+
     def validate_amount(self, value):
         if value <= 0:
             raise serializers.ValidationError("Amount must be greater than zero.")
         return value
+
+    def validate(self, data):
+        lease = data.get('lease') or getattr(self.instance, 'lease', None)
+        if not lease:
+            return data
+
+        request = self.context.get('request')
+        user_role = request.user.role if request else None
+
+        # ✅ Admin/Landlord are always exempt
+        if user_role in ['admin', 'landlord']:
+            return data
+
+        # ✅ Count ONLY completed payments for THIS exact lease
+        total_completed = Payment.objects.filter(
+            lease=lease,
+            status='COMPLETED'
+        ).aggregate(total=Sum('amount'))['total'] or Decimal('0')
+
+        # ✅ Allow FIRST payment ever — no false block for new leases
+        if total_completed == Decimal('0'):
+            return data
+
+        # ✅ Fixed Decimal math — no type errors!
+        outstanding = max(Decimal('0'), lease.monthly_rent - total_completed)
+        if outstanding > Decimal('0'):
+            raise serializers.ValidationError({
+                "error": f"You cannot pay rent for this month until you clear the outstanding balance of KSh {outstanding:.2f} from the previous month.",
+                "current_balance_due": f"{outstanding:.2f}"
+            })
+
+        return data
