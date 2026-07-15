@@ -3,6 +3,8 @@ from django.contrib.auth.password_validation import validate_password
 from django.db.models import Sum,F
 from datetime import datetime
 from decimal import Decimal
+from django.db.models import Sum
+from decimal import Decimal  
 # ✅ Import from core.models as you originally had
 from .models import (
     User, Landlord, Tenant, Property, RentalRequest,
@@ -211,8 +213,7 @@ class MaintenanceSerializer(serializers.ModelSerializer):
 # # ------------------------------
 # PAYMENT SERIALIZER — 100% WORKING
 # ------------------------------
-from django.db.models import Sum
-from decimal import Decimal  # ✅ Required for currency math
+# ✅ Required for currency math
 
 class PaymentSerializer(serializers.ModelSerializer):
     property_title = serializers.CharField(source='lease.property.title', read_only=True)
@@ -221,12 +222,18 @@ class PaymentSerializer(serializers.ModelSerializer):
     lease_monthly_rent = serializers.DecimalField(source='lease.monthly_rent', max_digits=12, decimal_places=2, read_only=True)
     covers_months = serializers.SerializerMethodField()
 
+    # --- NEW RECEIPT FIELDS (added only here) ---
+    receipt_number = serializers.CharField(read_only=True)
+    receipt_issued_at = serializers.DateTimeField(read_only=True)
+    balance_after_payment = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
+
     class Meta:
         model = Payment
         fields = "__all__"
         read_only_fields = [
             "id", "payment_date", "created_at", "updated_at",
-            "property_title", "tenant_name", "landlord_name", "lease_monthly_rent", "covers_months"
+            "property_title", "tenant_name", "landlord_name", "lease_monthly_rent", "covers_months",
+            "receipt_number", "receipt_issued_at", "balance_after_payment"
         ]
 
     def get_covers_months(self, obj):

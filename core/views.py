@@ -1,22 +1,24 @@
-# from rest_framework import permissions
-from decimal import Decimal
-
+# ==================================================
+# Imports — Core libraries, DRF utilities, models & serializers
+# ==================================================
 from rest_framework import permissions
-from rest_framework.decorators import  api_view, permission_classes
+from decimal import Decimal
+from django.utils import timezone
+from rest_framework.decorators import api_view, permission_classes
 from rest_framework.views import APIView 
 from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser
 from rest_framework.response import Response
 from rest_framework import status
-from datetime import datetime, date
+from datetime import datetime, date 
 from django.db import transaction, IntegrityError
 from django.contrib.auth import get_user_model, authenticate
 from rest_framework_simplejwt.tokens import RefreshToken
 from django.db.models import Q, Sum, Count
 
-# ✅ All models imported correctly
+# System models
 from .models import Landlord, Lease, Payment, Tenant, Property, Notice, Maintenance, User
 
-# ✅ All serializers imported correctly
+# Serializers for data conversion & validation
 from .serializers import (
     LeaseSerializer,
     MaintenanceSerializer,
@@ -32,14 +34,15 @@ from .serializers import (
 
 User = get_user_model()
 
-# ------------------------------
-# Admin creates Landlord
-# ------------------------------
+
+# ==================================================
+# Admin & Landlord User Management
+# ==================================================
 class AdminCreateLandlordView(APIView):
+    """Admin-only endpoint to create new landlord accounts"""
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
-        # Only allow admins
         if request.user.role != 'admin':
             return Response({"error": "Only admin can create landlords."}, status=status.HTTP_403_FORBIDDEN)
 
@@ -49,14 +52,12 @@ class AdminCreateLandlordView(APIView):
             return Response({"message": "Landlord account created successfully."}, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-# ------------------------------
-# Landlord creates Tenant
-# ------------------------------
+
 class LandlordCreateTenantView(APIView):
+    """Landlord-only endpoint to register new tenants"""
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
-        # Only allow landlords
         if request.user.role != 'landlord':
             return Response({"error": "Only landlords can register tenants."}, status=status.HTTP_403_FORBIDDEN)
 
@@ -67,13 +68,19 @@ class LandlordCreateTenantView(APIView):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
-# --------------------------
-# Register
-# --------------------------
+# ==================================================
+# Authentication: Register, Login, Profile
+# ==================================================
 @api_view(["POST"])
 @permission_classes([IsAdminUser])
 @transaction.atomic
 def Register(request):
+    """
+    User registration:
+    - First account must be Admin
+    - Admins can create any role; Landlords can only create tenants
+    - Auto-creates matching Landlord/Tenant profile on successful registration
+    """
     serializer = UserRegistrationSerializer(data=request.data)
     if not serializer.is_valid():
         return Response({"error": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
@@ -82,9 +89,11 @@ def Register(request):
     requested_role = data["role"]
     user_count = User.objects.count()
 
+    # Enforce first account is admin
     if user_count == 0 and requested_role != "admin":
         return Response({"error": "First account created must be an Admin."}, status=status.HTTP_403_FORBIDDEN)
 
+    # Enforce role-based creation rules
     if user_count > 0:
         if not request.user.is_authenticated:
             return Response({"error": "Authentication required to register new users."}, status=status.HTTP_401_UNAUTHORIZED)
@@ -98,6 +107,7 @@ def Register(request):
             return Response({"error": f"As {request.user.role}, you can only register: {', '.join(allowed)}"}, status=status.HTTP_403_FORBIDDEN)
 
     try:
+        # Create core user account
         user = User.objects.create_user(
             email=data["email"],
             username=data.get("username") or data["email"].split("@")[0],
@@ -108,7 +118,7 @@ def Register(request):
             is_superuser=(requested_role == "admin")
         )
 
-        # ✅ Safely create related profile if it doesn't exist
+        # Create linked profile for landlord/tenant
         if requested_role == "landlord":
             Landlord.objects.get_or_create(user=user, defaults={
                 "full_name": request.data.get("full_name", ""),
@@ -153,12 +163,10 @@ def Register(request):
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 
-# --------------------------
-# Login
-# --------------------------
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def Login(request):
+    """Authenticate user and return JWT access/refresh tokens + profile data"""
     email = request.data.get("email")
     password = request.data.get("password")
 
@@ -172,6 +180,7 @@ def Login(request):
     refresh = RefreshToken.for_user(user)
     profile_data = {}
 
+    # Attach role-specific profile data
     if user.role == "landlord" and hasattr(user, "landlord_profile"):
         profile_data = LandlordProfileSerializer(user.landlord_profile).data
     elif user.role == "tenant" and hasattr(user, "tenant"):
@@ -186,12 +195,10 @@ def Login(request):
     })
 
 
-# --------------------------
-# Profile
-# --------------------------
 @api_view(["GET", "PUT", "PATCH"])
 @permission_classes([IsAuthenticated])
 def ProfileView(request):
+    """Fetch or update logged-in user's profile (landlord/tenant only)"""
     user = request.user
 
     if user.role == "admin":
@@ -202,22 +209,21 @@ def ProfileView(request):
             if not hasattr(user, "landlord_profile"):
                 return Response({"error": "Landlord profile not found."}, status=status.HTTP_404_NOT_FOUND)
             profile = user.landlord_profile
-            if request.method == "GET":
-                serializer = LandlordProfileSerializer(profile)
-            else:
-                serializer = LandlordProfileSerializer(profile, data=request.data, partial=True)
+            serializer_cls = LandlordProfileSerializer
 
         elif user.role == "tenant":
             if not hasattr(user, "tenant"):
                 return Response({"error": "Tenant profile not found."}, status=status.HTTP_404_NOT_FOUND)
             profile = user.tenant
-            if request.method == "GET":
-                serializer = TenantProfileSerializer(profile)
-            else:
-                serializer = TenantProfileSerializer(profile, data=request.data, partial=True)
+            serializer_cls = TenantProfileSerializer
 
         else:
             return Response({"error": "Invalid role."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if request.method == "GET":
+            serializer = serializer_cls(profile)
+        else:
+            serializer = serializer_cls(profile, data=request.data, partial=True)
 
     except (Landlord.DoesNotExist, Tenant.DoesNotExist):
         return Response({"error": "Profile not found."}, status=status.HTTP_404_NOT_FOUND)
@@ -232,47 +238,41 @@ def ProfileView(request):
     return Response({"error": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
 
 
-# ------------------------------
-# LEASE VIEWS
-# ------------------------------
+# ==================================================
+# Lease Management
+# ==================================================
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def lease_list_create(request):
+    """
+    - GET: List leases filtered by user role
+    - POST: Admin/landlord can create leases; auto-updates property occupancy status
+    """
     user = request.user
 
     if request.method == 'POST':
         if user.role not in ['admin', 'landlord']:
-            return Response(
-                {"error": "Only admins and landlords can create leases."},
-                status=status.HTTP_403_FORBIDDEN
-            )
+            return Response({"error": "Only admins and landlords can create leases."}, status=status.HTTP_403_FORBIDDEN)
 
         serializer = LeaseSerializer(data=request.data)
         if serializer.is_valid():
             property_obj = serializer.validated_data['property']
 
             if user.role == 'landlord' and property_obj.landlord != getattr(user, "landlord_profile", None):
-                return Response(
-                    {"error": "You can only create leases for your own properties."},
-                    status=status.HTTP_403_FORBIDDEN
-                )
+                return Response({"error": "You can only create leases for your own properties."}, status=status.HTTP_403_FORBIDDEN)
 
             lease = serializer.save()
 
+            # Mark property as occupied when lease is active
             if lease.status == "ACTIVE":
                 property_obj.status = "OCCUPIED"
                 property_obj.save(update_fields=['status'])
 
-            return Response(
-                {
-                    "message": "Lease created successfully",
-                    "lease": serializer.data
-                },
-                status=status.HTTP_201_CREATED
-            )
+            return Response({"message": "Lease created successfully", "lease": serializer.data}, status=status.HTTP_201_CREATED)
 
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+    # Role-based lease filtering
     if user.role == 'admin':
         leases = Lease.objects.all().order_by('-created_at')
     elif user.role == 'landlord' and hasattr(user, "landlord_profile"):
@@ -289,26 +289,19 @@ def lease_list_create(request):
 @api_view(['GET', 'PUT', 'DELETE'])
 @permission_classes([IsAuthenticated])
 def lease_detail(request, lease_id):
+    """View, update, or delete a single lease; syncs property occupancy status"""
     user = request.user
 
     try:
         lease = Lease.objects.get(id=lease_id)
     except Lease.DoesNotExist:
-        return Response(
-            {"error": "Lease not found."},
-            status=status.HTTP_404_NOT_FOUND
-        )
+        return Response({"error": "Lease not found."}, status=status.HTTP_404_NOT_FOUND)
 
+    # Access controls
     if user.role == 'landlord' and hasattr(user, "landlord_profile") and lease.property.landlord != user.landlord_profile:
-        return Response(
-            {"error": "You can only access leases for your own properties."},
-            status=status.HTTP_403_FORBIDDEN
-        )
+        return Response({"error": "You can only access leases for your own properties."}, status=status.HTTP_403_FORBIDDEN)
     if user.role == 'tenant' and hasattr(user, "tenant") and lease.tenant != user.tenant:
-        return Response(
-            {"error": "You can only view your own lease."},
-            status=status.HTTP_403_FORBIDDEN
-        )
+        return Response({"error": "You can only view your own lease."}, status=status.HTTP_403_FORBIDDEN)
 
     if request.method == 'GET':
         serializer = LeaseSerializer(lease)
@@ -316,74 +309,53 @@ def lease_detail(request, lease_id):
 
     if request.method == 'PUT':
         if user.role == 'tenant':
-            return Response(
-                {"error": "Tenants cannot edit leases."},
-                status=status.HTTP_403_FORBIDDEN
-            )
+            return Response({"error": "Tenants cannot edit leases."}, status=status.HTTP_403_FORBIDDEN)
 
         serializer = LeaseSerializer(lease, data=request.data, partial=True)
         if serializer.is_valid():
             updated_lease = serializer.save()
-            if updated_lease.status == "ACTIVE":
-                updated_lease.property.status = "OCCUPIED"
-            else:
-                updated_lease.property.status = "AVAILABLE"
+            # Update property status based on lease status
+            updated_lease.property.status = "OCCUPIED" if updated_lease.status == "ACTIVE" else "AVAILABLE"
             updated_lease.property.save(update_fields=['status'])
 
-            return Response(
-                {
-                    "message": "Lease updated successfully",
-                    "lease": serializer.data
-                },
-                status=status.HTTP_200_OK
-            )
+            return Response({"message": "Lease updated successfully", "lease": serializer.data}, status=status.HTTP_200_OK)
 
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     if request.method == 'DELETE':
         if user.role not in ['admin', 'landlord']:
-            return Response(
-                {"error": "Only admins and landlords can delete leases."},
-                status=status.HTTP_403_FORBIDDEN
-            )
+            return Response({"error": "Only admins and landlords can delete leases."}, status=status.HTTP_403_FORBIDDEN)
 
         lease.property.status = "AVAILABLE"
         lease.property.save(update_fields=['status'])
         lease.delete()
 
-        return Response(
-            {"message": "Lease deleted successfully."},
-            status=status.HTTP_200_OK
-        )
+        return Response({"message": "Lease deleted successfully."}, status=status.HTTP_200_OK)
 
 
-# ------------------------------
-# NOTICE VIEWS
-# ------------------------------
+# ==================================================
+# Notice Management
+# ==================================================
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def notice_list_create(request):
+    """
+    - GET: Tenants see public notices; creators see their own; admins see all
+    - POST: Only admins/landlords can create notices
+    """
     user = request.user
 
     if request.method == 'POST':
         if user.role not in ['admin', 'landlord']:
-            return Response(
-                {"error": "Only admins and landlords can create notices."},
-                status=status.HTTP_403_FORBIDDEN
-            )
+            return Response({"error": "Only admins and landlords can create notices."}, status=status.HTTP_403_FORBIDDEN)
 
         serializer = NoticeSerializer(data=request.data)
         if serializer.is_valid():
             serializer.save(created_by=user)
-            return Response(
-                {
-                    "message": "Notice created successfully",
-                    "notice": serializer.data
-                },
-                status=status.HTTP_201_CREATED
-            )
+            return Response({"message": "Notice created successfully", "notice": serializer.data}, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+    # Role-based filtering
     if user.role == 'admin':
         notices = Notice.objects.all().order_by('-created_at')
     elif user.role == 'landlord':
@@ -400,27 +372,20 @@ def notice_list_create(request):
 @api_view(['GET', 'PUT', 'DELETE'])
 @permission_classes([IsAuthenticated])
 def notice_detail(request, notice_id):
+    """View or manage a single notice; tenants can only view"""
     user = request.user
 
     try:
         notice = Notice.objects.get(id=notice_id)
     except Notice.DoesNotExist:
-        return Response(
-            {"error": "Notice not found."},
-            status=status.HTTP_404_NOT_FOUND
-        )
+        return Response({"error": "Notice not found."}, status=status.HTTP_404_NOT_FOUND)
 
+    # Permissions
     if user.role == 'tenant':
         if request.method != 'GET':
-            return Response(
-                {"error": "Tenants cannot modify or delete notices."},
-                status=status.HTTP_403_FORBIDDEN
-            )
+            return Response({"error": "Tenants cannot modify or delete notices."}, status=status.HTTP_403_FORBIDDEN)
     elif user.role == 'landlord' and notice.created_by != user:
-        return Response(
-            {"error": "You can only manage notices you created."},
-            status=status.HTTP_403_FORBIDDEN
-        )
+        return Response({"error": "You can only manage notices you created."}, status=status.HTTP_403_FORBIDDEN)
 
     if request.method == 'GET':
         serializer = NoticeSerializer(notice)
@@ -430,50 +395,37 @@ def notice_detail(request, notice_id):
         serializer = NoticeSerializer(notice, data=request.data, partial=True)
         if serializer.is_valid():
             serializer.save()
-            return Response(
-                {
-                    "message": "Notice updated successfully",
-                    "notice": serializer.data
-                },
-                status=status.HTTP_200_OK
-            )
+            return Response({"message": "Notice updated successfully", "notice": serializer.data}, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     if request.method == 'DELETE':
         notice.delete()
-        return Response(
-            {"message": "Notice deleted successfully."},
-            status=status.HTTP_200_OK
-        )
+        return Response({"message": "Notice deleted successfully."}, status=status.HTTP_200_OK)
 
 
-# ------------------------------
-# MAINTENANCE VIEWS
-# ------------------------------
+# ==================================================
+# Maintenance Requests
+# ==================================================
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def maintenance_list_create(request):
+    """
+    - GET: Filter requests by user role
+    - POST: Only tenants can submit new requests
+    """
     user = request.user
 
     if request.method == 'POST':
         if user.role != 'tenant' or not hasattr(user, "tenant"):
-            return Response(
-                {"error": "Only tenants can submit maintenance requests."},
-                status=status.HTTP_403_FORBIDDEN
-            )
+            return Response({"error": "Only tenants can submit maintenance requests."}, status=status.HTTP_403_FORBIDDEN)
 
         serializer = MaintenanceSerializer(data=request.data)
         if serializer.is_valid():
             serializer.save(tenant=user.tenant)
-            return Response(
-                {
-                    "message": "Maintenance request submitted successfully",
-                    "maintenance": serializer.data
-                },
-                status=status.HTTP_201_CREATED
-            )
+            return Response({"message": "Maintenance request submitted successfully", "maintenance": serializer.data}, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+    # Role-based filtering
     if user.role == 'admin':
         requests = Maintenance.objects.all().order_by('-created_at')
     elif user.role == 'landlord' and hasattr(user, "landlord_profile"):
@@ -490,34 +442,24 @@ def maintenance_list_create(request):
 @api_view(['GET', 'PUT', 'DELETE'])
 @permission_classes([IsAuthenticated])
 def maintenance_detail(request, maintenance_id):
+    """View, update, or delete a single maintenance request"""
     user = request.user
 
     try:
         req = Maintenance.objects.get(id=maintenance_id)
     except Maintenance.DoesNotExist:
-        return Response(
-            {"error": "Maintenance request not found."},
-            status=status.HTTP_404_NOT_FOUND
-        )
+        return Response({"error": "Maintenance request not found."}, status=status.HTTP_404_NOT_FOUND)
 
+    # Access controls
     if user.role == 'tenant':
         if not hasattr(user, "tenant") or req.tenant != user.tenant:
-            return Response(
-                {"error": "You can only access your own maintenance requests."},
-                status=status.HTTP_403_FORBIDDEN
-            )
+            return Response({"error": "You can only access your own maintenance requests."}, status=status.HTTP_403_FORBIDDEN)
         if request.method == 'DELETE':
-            return Response(
-                {"error": "Tenants cannot delete maintenance requests."},
-                status=status.HTTP_403_FORBIDDEN
-            )
+            return Response({"error": "Tenants cannot delete maintenance requests."}, status=status.HTTP_403_FORBIDDEN)
 
     elif user.role == 'landlord' and hasattr(user, "landlord_profile"):
         if req.property.landlord != user.landlord_profile:
-            return Response(
-                {"error": "You can only manage requests for your own properties."},
-                status=status.HTTP_403_FORBIDDEN
-            )
+            return Response({"error": "You can only manage requests for your own properties."}, status=status.HTTP_403_FORBIDDEN)
 
     if request.method == 'GET':
         serializer = MaintenanceSerializer(req)
@@ -527,97 +469,69 @@ def maintenance_detail(request, maintenance_id):
         serializer = MaintenanceSerializer(req, data=request.data, partial=True)
         if serializer.is_valid():
             serializer.save()
-            return Response(
-                {
-                    "message": "Maintenance request updated successfully",
-                    "maintenance": serializer.data
-                },
-                status=status.HTTP_200_OK
-            )
+            return Response({"message": "Maintenance request updated successfully", "maintenance": serializer.data}, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     if request.method == 'DELETE':
         if user.role not in ['admin', 'landlord']:
-            return Response(
-                {"error": "Only admins and landlords can delete requests."},
-                status=status.HTTP_403_FORBIDDEN
-            )
+            return Response({"error": "Only admins and landlords can delete requests."}, status=status.HTTP_403_FORBIDDEN)
         req.delete()
-        return Response(
-            {"message": "Maintenance request deleted successfully."},
-            status=status.HTTP_200_OK
-        )   
+        return Response({"message": "Maintenance request deleted successfully."}, status=status.HTTP_200_OK)   
+
+
+# ==================================================
+# Payment System (Submission, History, Verification)
+# ==================================================
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def payment_list_create(request):
+    """
+    - POST: Tenants submit payments; auto-calculates covered months & pending status
+    - GET: View payment history + summary stats filtered by role
+    """
     user = request.user
 
     if request.method == 'POST':
         if user.role != 'tenant' or not hasattr(user, "tenant"):
-            return Response(
-                {"error": "Only tenants can submit payments."},
-                status=status.HTTP_403_FORBIDDEN
-            )
+            return Response({"error": "Only tenants can submit payments."}, status=status.HTTP_403_FORBIDDEN)
 
         serializer = PaymentSerializer(data=request.data, context={'request': request})
         if serializer.is_valid():
             lease = serializer.validated_data['lease']
 
+            # Validate lease eligibility
             if lease.tenant_id != user.tenant.id:
-                return Response(
-                    {"error": "You can only make payments for your own active leases."},
-                    status=status.HTTP_403_FORBIDDEN
-                )
+                return Response({"error": "You can only make payments for your own active leases."}, status=status.HTTP_403_FORBIDDEN)
             if lease.status != "ACTIVE":
-                return Response(
-                    {"error": "You can only pay for active leases."},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            # Block payments for expired leases
+                return Response({"error": "You can only pay for active leases."}, status=status.HTTP_400_BAD_REQUEST)
             if lease.end_date < datetime.today().date():
-                return Response(
-                    {"error": "Cannot submit payment — this lease has expired."},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+                return Response({"error": "Cannot submit payment — this lease has expired."}, status=status.HTTP_400_BAD_REQUEST)
 
             payment = serializer.save()
 
-            # ✅ Calculate which months this payment covers (oldest first)
+            # Calculate which months this payment covers (oldest first)
             monthly_rent = Decimal(lease.monthly_rent)
             paid_amount = Decimal(payment.amount)
             covered_months = []
             remaining = paid_amount
-
-            # Start from lease start date, go forward
             current = lease.start_date
             while remaining >= monthly_rent and current <= lease.end_date:
-                month_label = current.strftime("%B %Y")  # e.g. "July 2026"
-                covered_months.append(month_label)
+                covered_months.append(current.strftime("%B %Y"))
                 remaining -= monthly_rent
-                # Move to next month
-                if current.month == 12:
-                    current = current.replace(year=current.year + 1, month=1)
-                else:
-                    current = current.replace(month=current.month + 1)
+                current = current.replace(year=current.year + 1, month=1) if current.month == 12 else current.replace(month=current.month + 1)
 
-            # ✅ Pass covered months to serializer so it shows correctly
             payment.covered_months = covered_months
+            payment.save(update_fields=['covered_months'])
 
-            # ✅ Calculate remaining balance correctly (includes this new payment)
-            total_completed = lease.payments.filter(status='COMPLETED').aggregate(
-                total=Sum('amount')
-            )['total'] or Decimal('0')
-            # New balance = rent minus ALL completed + this pending payment
+            # Calculate balance status
+            total_completed = lease.payments.filter(status='COMPLETED').aggregate(total=Sum('amount'))['total'] or Decimal('0')
             total_effective = total_completed + paid_amount
             new_balance = max(Decimal('0'), lease.monthly_rent - total_effective)
 
-            # Build clear message
-            if covered_months:
-                months_text = ", ".join(covered_months)
-                extra_note = f" plus KSh {remaining:.2f} as advance credit" if remaining > 0 else ""
-                success_msg = f"Payment submitted successfully! This covers: {months_text}{extra_note}. Awaiting verification."
-            else:
-                success_msg = "Payment submitted successfully, awaiting verification."
+            # Build user-friendly response
+            months_text = ", ".join(covered_months) if covered_months else ""
+            extra_note = f" plus KSh {remaining:.2f} as advance credit" if remaining > 0 else ""
+            success_msg = f"Payment submitted successfully! This covers: {months_text}{extra_note}. Awaiting verification." if covered_months else "Payment submitted successfully, awaiting verification."
 
             return Response(
                 {
@@ -633,120 +547,104 @@ def payment_list_create(request):
 
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+    # GET: Filtered payment history with summary
+    if user.role == 'admin':
+        payments = Payment.objects.all().select_related('lease', 'lease__tenant', 'lease__property')
+    elif user.role == 'landlord' and hasattr(user, "landlord_profile"):
+        payments = Payment.objects.filter(lease__property__landlord=user.landlord_profile).select_related('lease', 'lease__tenant', 'lease__property')
+    elif user.role == 'tenant' and hasattr(user, "tenant") and user.is_active:
+        payments = Payment.objects.filter(lease__tenant=user.tenant).select_related('lease', 'lease__tenant', 'lease__property')
+    else:
+        payments = Payment.objects.none()
 
-    if request.method == 'GET':
-        if user.role == 'admin':
-            payments = Payment.objects.all().select_related('lease', 'lease__tenant', 'lease__property')
-        elif user.role == 'landlord' and hasattr(user, "landlord_profile"):
-            payments = Payment.objects.filter(lease__property__landlord=user.landlord_profile).select_related('lease', 'lease__tenant', 'lease__property')
-        elif user.role == 'tenant' and hasattr(user, "tenant") and user.is_active:
-            payments = Payment.objects.filter(lease__tenant=user.tenant).select_related('lease', 'lease__tenant', 'lease__property')
-        else:
-            payments = Payment.objects.none()
+    # Apply query filters
+    status_filter = request.query_params.get('status')
+    lease_id = request.query_params.get('lease_id')
+    tenant_id = request.query_params.get('tenant_id')
+    if status_filter: payments = payments.filter(status=status_filter.upper())
+    if lease_id: payments = payments.filter(lease_id=lease_id)
+    if tenant_id and user.role in ['admin', 'landlord']: payments = payments.filter(lease__tenant_id=tenant_id)
 
-        status_filter = request.query_params.get('status')
-        lease_id = request.query_params.get('lease_id')
-        tenant_id = request.query_params.get('tenant_id')
+    # Calculate summary stats
+    total_paid = sum(p.amount for p in payments.filter(status='COMPLETED')) or Decimal('0.00')
+    total_pending = sum(p.amount for p in payments.filter(status='PENDING')) or Decimal('0.00')
+    monthly_rent = payments.first().lease.monthly_rent if payments.exists() else Decimal('0.00')
+    balance_due = max(Decimal('0.00'), monthly_rent - total_paid)
+    clear_msg = f"⚠️ You currently owe KSh {balance_due:.2f}. Clear this balance before paying for new months." if balance_due > 0 else "✅ All payments are up to date!"
 
-        if status_filter:
-            payments = payments.filter(status=status_filter.upper())
-        if lease_id:
-            payments = payments.filter(lease_id=lease_id)
-        if tenant_id and user.role in ['admin', 'landlord']:
-            payments = payments.filter(lease__tenant_id=tenant_id)
-
-        # ✅ Initialize all variables FIRST to avoid UnboundLocalError
-        total_paid = Decimal('0.00')
-        total_pending = Decimal('0.00')
-        monthly_rent = Decimal('0.00')
-
-        if payments.exists():
-            total_paid = sum(p.amount for p in payments.filter(status='COMPLETED')) or Decimal('0.00')
-            total_pending = sum(p.amount for p in payments.filter(status='PENDING')) or Decimal('0.00')
-            monthly_rent = payments.first().lease.monthly_rent
-
-        balance_due = max(Decimal('0.00'), monthly_rent - total_paid)
-
-        serializer = PaymentSerializer(payments, many=True, context={'request': request})
-
-        return Response({
-            "summary": {
-                "monthly_rent": f"{monthly_rent:.2f}",
-                "total_paid": f"{total_paid:.2f}",
-                "total_pending": f"{total_pending:.2f}",
-                "balance_due": f"{balance_due:.2f}",
-                "clear_message": f"⚠️ You currently owe KSh {balance_due:.2f}. Clear this balance before paying for new months.",
-                "note": "Payments apply to the oldest unpaid month first."
-            },
-            "payments": serializer.data
-        })
+    serializer = PaymentSerializer(payments.order_by('-created_at'), many=True, context={'request': request})
+    return Response({
+        "summary": {
+            "monthly_rent": f"{monthly_rent:.2f}",
+            "total_paid": f"{total_paid:.2f}",
+            "total_pending": f"{total_pending:.2f}",
+            "balance_due": f"{balance_due:.2f}",
+            "clear_message": clear_msg,
+            "note": "Payments apply to the oldest unpaid month first."
+        },
+        "payments": serializer.data
+    })
 
 
-# --- payment_detail function REMAINS 100% UNCHANGED ---
 @api_view(['GET', 'PUT', 'DELETE'])
 @permission_classes([IsAuthenticated])
 def payment_detail(request, payment_id):
+    """View, update, or delete a single payment; receipt fields auto-set on verification"""
     try:
-        payment = Payment.objects.get(id=payment_id)
+        payment = Payment.objects.select_related('lease', 'lease__property', 'lease__tenant').get(id=payment_id)
     except Payment.DoesNotExist:
         return Response({"error": "Payment not found."}, status=status.HTTP_404_NOT_FOUND)
 
+    # Access controls
     if request.user.role == 'tenant' and hasattr(request.user, "tenant"):
         if payment.lease.tenant != request.user.tenant:
             return Response({"error": "Access denied."}, status=status.HTTP_403_FORBIDDEN)
         if request.method in ['PUT', 'DELETE']:
-            return Response({"error": "Only landlords/admins can update payments."}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"error": "Only landlords or admins can modify payments."}, status=status.HTTP_403_FORBIDDEN)
 
     elif request.user.role == 'landlord' and hasattr(request.user, "landlord_profile"):
         if payment.lease.property.landlord != request.user.landlord_profile:
-            return Response({"error": "Access denied."}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"error": "You can only manage payments for your own properties."}, status=status.HTTP_403_FORBIDDEN)
 
     if request.method == 'GET':
-        serializer = PaymentSerializer(payment, context={'request': request})
-        return Response({"payment": serializer.data})
+        return Response({"payment": PaymentSerializer(payment, context={'request': request}).data})
 
     if request.method == 'PUT':
         serializer = PaymentSerializer(payment, data=request.data, partial=True, context={'request': request})
         if serializer.is_valid():
             serializer.save()
-            return Response({
-                "message": "Payment updated successfully.",
-                "payment": serializer.data
-            })
+            return Response({"message": "Payment updated successfully.", "payment": serializer.data}, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     if request.method == 'DELETE':
-        if request.user.role not in ['admin', 'landlord']:
-            return Response({"error": "Only admins can delete payments."}, status=status.HTTP_403_FORBIDDEN)
+        if request.user.role != 'admin':
+            return Response({"error": "Only system admins can delete payments."}, status=status.HTTP_403_FORBIDDEN)
         payment.delete()
-        return Response({"message": "Payment deleted."})
+        return Response({"message": "Payment deleted successfully."})
 
 
-# ------------------------------
-# Check Rent For Specific Month
-# ------------------------------
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def rent_for_month(request):
+    """Check if a specific month's rent is paid or payable (format: ?month=2026-08)"""
     month = request.query_params.get('month')
     if not month:
-        return Response({"error": "Please provide month like: ?month=2026-08"}, status=400)
+        return Response({"error": "Please provide month like: ?month=2026-08"}, status=status.HTTP_400_BAD_REQUEST)
 
     try:
         target_date = datetime.strptime(month, "%Y-%m").date()
     except:
-        return Response({"error": "Use format: ?month=2026-08"}, status=400)
+        return Response({"error": "Invalid format. Use: ?month=2026-08"}, status=status.HTTP_400_BAD_REQUEST)
 
     if request.user.role == 'tenant' and hasattr(request.user, "tenant") and request.user.is_active:
         lease = Lease.objects.filter(tenant=request.user.tenant, status='ACTIVE').first()
         if not lease:
-            return Response({"error": "No active lease found."}, status=404)
-
+            return Response({"error": "No active lease found."}, status=status.HTTP_404_NOT_FOUND)
         if target_date < lease.start_date or target_date > lease.end_date:
-            return Response({"error": "This month is not covered by your lease."}, status=400)
+            return Response({"error": "This month is not covered by your lease period."}, status=status.HTTP_400_BAD_REQUEST)
 
         month_name = target_date.strftime("%B %Y")
-        total_paid = lease.payments.filter(status='COMPLETED').aggregate(Sum('amount'))['amount__sum'] or Decimal('0')
+        total_paid = lease.payments.filter(status='COMPLETED').aggregate(Sum('amount'))['total'] or Decimal('0')
         paid_for_this = total_paid >= lease.monthly_rent
 
         return Response({
@@ -757,69 +655,153 @@ def rent_for_month(request):
             "note": "Payments clear oldest balance first."
         })
 
-    return Response({"error": "Only active tenants can check this."}, status=status.HTTP_403_FORBIDDEN)
-# ------------------------------
-# ✅ SUPER ADMIN DASHBOARD API
-# ------------------------------
-@api_view(['GET'])
+    return Response({"error": "Only active tenants can check this information."}, status=status.HTTP_403_FORBIDDEN)
+
+
+@api_view(['PUT'])
 @permission_classes([IsAuthenticated])
-def admin_dashboard_stats(request):
-    """Get all system statistics for Super Admin only"""
-    if request.user.role != 'admin':
-        return Response({"error": "Only system administrators can access this data."}, status=status.HTTP_403_FORBIDDEN)
+def verify_payment(request, payment_id):
+    """
+    Landlord/Admin verifies pending payments:
+    - Sets status to COMPLETED/FAILED
+    - Auto-generates receipt number, timestamp & balance data for COMPLETED payments
+    """
+    try:
+        payment = Payment.objects.select_related('lease', 'lease__property', 'lease__tenant').get(id=payment_id)
+    except Payment.DoesNotExist:
+        return Response({"error": "Payment not found"}, status=status.HTTP_404_NOT_FOUND)
 
-    total_users = User.objects.count()
-    total_landlords = Landlord.objects.count()
-    total_tenants = Tenant.objects.count()
-    total_properties = Property.objects.count()
+    user = request.user
+    # Permissions
+    if user.role == 'tenant':
+        return Response({"error": "Only landlords or admins can verify payments"}, status=status.HTTP_403_FORBIDDEN)
+    if user.role == 'landlord' and hasattr(user, 'landlord_profile'):
+        if payment.lease.property.landlord != user.landlord_profile:
+            return Response({"error": "You can only verify payments for your own properties"}, status=status.HTTP_403_FORBIDDEN)
 
-    available_properties = Property.objects.filter(status='AVAILABLE').count()
-    occupied_properties = Property.objects.filter(status='OCCUPIED').count()
-    under_repair = Property.objects.filter(status='MAINTENANCE').count()
+    # Validation
+    if payment.status != 'PENDING':
+        return Response({"error": "Only pending payments can be verified"}, status=status.HTTP_400_BAD_REQUEST)
+    new_status = request.data.get('status')
+    if new_status not in ['COMPLETED', 'FAILED']:
+        return Response({"error": "Status must be COMPLETED or FAILED"}, status=status.HTTP_400_BAD_REQUEST)
 
-    pending_leases = Lease.objects.filter(status='PENDING').count()
-    active_leases = Lease.objects.filter(status='ACTIVE').count()
+    payment.status = new_status
 
-    pending_maintenance = Maintenance.objects.filter(status='PENDING').count()
-    completed_maintenance = Maintenance.objects.filter(status='COMPLETED').count()
+    # Generate receipt details only for successful payments
+    if new_status == 'COMPLETED':
+        payment.receipt_number = f"RCPT-{timezone.now().strftime('%Y%m%d')}-{payment.id:06d}"
+        payment.receipt_issued_at = timezone.now()
 
-    total_revenue = Payment.objects.filter(status='COMPLETED').aggregate(total=Sum('amount'))['total'] or 0
-    pending_payments = Payment.objects.filter(status='PENDING').aggregate(total=Sum('amount'))['total'] or 0
+        # Recalculate covered months
+        monthly_rent = payment.lease.monthly_rent
+        paid_amount = payment.amount
+        covered = []
+        remaining = paid_amount
+        current = payment.lease.start_date
+        while remaining >= monthly_rent and current <= payment.lease.end_date:
+            covered.append(current.strftime("%B %Y"))
+            remaining -= monthly_rent
+            current = current.replace(year=current.year + 1, month=1) if current.month == 12 else current.replace(month=current.month + 1)
+        payment.covered_months = covered
 
+        # Update post-payment balance
+        total_paid = Payment.objects.filter(lease=payment.lease, status='COMPLETED').aggregate(total=Sum('amount'))['total'] or Decimal('0')
+        payment.balance_after_payment = max(Decimal('0'), monthly_rent - total_paid)
+
+    payment.save()
     return Response({
-        "users": {
-            "total": total_users,
-            "landlords": total_landlords,
-            "tenants": total_tenants
-        },
-        "properties": {
-            "total": total_properties,
-            "available": available_properties,
-            "occupied": occupied_properties,
-            "under_repair": under_repair
-        },
-        "leases": {
-            "active": active_leases,
-            "pending": pending_leases
-        },
-        "maintenance": {
-            "pending": pending_maintenance,
-            "completed": completed_maintenance
-        },
-        "payments": {
-            "total_revenue": round(total_revenue, 2),
-            "pending_amount": round(pending_payments, 2)
-        }
+        "message": f"Payment marked as {new_status}",
+        "receipt_available": new_status == 'COMPLETED',
+        "payment": PaymentSerializer(payment, context={'request': request}).data
     }, status=status.HTTP_200_OK)
 
 
+# ==================================================
+# Super Admin Dashboard
+# ==================================================
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def admin_all_users(request):
-    """List all users in the system"""
+    """List all system users (admin only)"""
     if request.user.role != 'admin':
         return Response({"error": "Access denied"}, status=status.HTTP_403_FORBIDDEN)
 
     users = User.objects.all().order_by('-date_joined')
-    serializer = UserSerializer(users, many=True)
-    return Response({"users": serializer.data})
+    return Response({"users": UserSerializer(users, many=True).data})
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def admin_dashboard_stats(request):
+    """Aggregated system-wide stats for admin overview"""
+    if request.user.role != 'admin':
+        return Response({"error": "Admin access required"}, status=403)
+
+    # User counts
+    total_users = User.objects.count()
+    admin_count = User.objects.filter(role='admin').count()
+    landlord_count = User.objects.filter(role='landlord').count()
+    tenant_count = User.objects.filter(role='tenant').count()
+
+    # Property stats
+    total_properties = Property.objects.count()
+    available = Property.objects.filter(status='VACANT').count()
+    occupied = Property.objects.filter(status='OCCUPIED').count()
+    under_repair = Property.objects.filter(status='MAINTENANCE').count()
+    occupancy_rate = f"{(occupied / total_properties * 100):.0f}%" if total_properties > 0 else "0%"
+
+    # Lease stats
+    total_leases = Lease.objects.count()
+    active_leases = Lease.objects.filter(status='ACTIVE').count()
+    pending_leases = Lease.objects.filter(status='PENDING').count()
+    expired_leases = Lease.objects.filter(status='EXPIRED').count()
+    terminated_leases = Lease.objects.filter(status='TERMINATED').count()
+
+    # Maintenance stats
+    total_maint = Maintenance.objects.count()
+    pending_maint = Maintenance.objects.filter(status__in=['PENDING', 'IN_PROGRESS']).count()
+    completed_maint = Maintenance.objects.filter(status='COMPLETED').count()
+
+    # Payment stats
+    total_collected = Payment.objects.filter(status='COMPLETED').aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+    pending_amount = Payment.objects.filter(status='PENDING').aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+    expected_rent = Lease.objects.filter(status='ACTIVE').aggregate(total=Sum('monthly_rent'))['total'] or Decimal('0.00')
+
+    return Response({
+        "summary": {
+            "report_generated": datetime.now().isoformat(),
+            "system_status": "Active"
+        },
+        "users": {
+            "total": total_users,
+            "admins": admin_count,
+            "landlords": landlord_count,
+            "tenants": tenant_count
+        },
+        "properties": {
+            "total": total_properties,
+            "available": available,
+            "occupied": occupied,
+            "under_repair": under_repair,
+            "occupancy_rate": occupancy_rate
+        },
+        "leases": {
+            "total": total_leases,
+            "active": active_leases,
+            "pending": pending_leases,
+            "expired": expired_leases,
+            "terminated": terminated_leases
+        },
+        "maintenance": {
+            "total": total_maint,
+            "pending": pending_maint,
+            "completed": completed_maint
+        },
+        "payments": {
+            "total_revenue_collected": float(total_collected),
+            "pending_verification": float(pending_amount),
+            "outstanding_balance": 0.00,
+            "expected_monthly_rent": float(expected_rent)
+        }
+    })
