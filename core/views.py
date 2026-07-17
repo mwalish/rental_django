@@ -1,6 +1,11 @@
 # ==================================================
 # Imports — Core libraries, DRF utilities, models & serializers
 # ==================================================
+"""
+Views module for the core property management system.
+All endpoints follow consistent role-based access control rules.
+Changes here affect API behavior — test thoroughly after updates.
+"""
 from rest_framework import permissions
 from decimal import Decimal
 from django.utils import timezone
@@ -15,10 +20,10 @@ from django.contrib.auth import get_user_model, authenticate
 from rest_framework_simplejwt.tokens import RefreshToken
 from django.db.models import Q, Sum, Count
 
-# System models
-from .models import Landlord, Lease, Payment, Tenant, Property, Notice, Maintenance, User
+# System models — keep imports synced with models.py
+from .models import Landlord, Lease, Payment, Tenant, Property, Notice, Maintenance, User, RentalRequest, Meeting
 
-# Serializers for data conversion & validation
+# Serializers for data conversion & validation — synced with serializers.py
 from .serializers import (
     LeaseSerializer,
     MaintenanceSerializer,
@@ -29,7 +34,9 @@ from .serializers import (
     LandlordProfileSerializer,
     TenantProfileSerializer,
     LandlordCreateSerializer, 
-    TenantCreateSerializer
+    TenantCreateSerializer,
+    RentalRequestSerializer,
+    MeetingSerializer
 )
 
 User = get_user_model()
@@ -39,13 +46,19 @@ User = get_user_model()
 # Admin & Landlord User Management
 # ==================================================
 class AdminCreateLandlordView(APIView):
-    """Admin-only endpoint to create new landlord accounts"""
+    """
+    Admin-only endpoint to create new landlord accounts.
+    Creates both core User record and linked Landlord profile automatically.
+    Permissions: Must be logged in as system admin.
+    """
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
+        # Block non-admin users from accessing this endpoint
         if request.user.role != 'admin':
             return Response({"error": "Only admin can create landlords."}, status=status.HTTP_403_FORBIDDEN)
 
+        # Validate input data against serializer rules
         serializer = LandlordCreateSerializer(data=request.data)
         if serializer.is_valid():
             serializer.save()
@@ -54,10 +67,15 @@ class AdminCreateLandlordView(APIView):
 
 
 class LandlordCreateTenantView(APIView):
-    """Landlord-only endpoint to register new tenants"""
+    """
+    Landlord-only endpoint to register new tenant accounts directly.
+    Used when landlords add tenants to their properties without public sign-up.
+    Permissions: Must be logged in as landlord.
+    """
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
+        # Block non-landlord users
         if request.user.role != 'landlord':
             return Response({"error": "Only landlords can register tenants."}, status=status.HTTP_403_FORBIDDEN)
 
@@ -76,10 +94,12 @@ class LandlordCreateTenantView(APIView):
 @transaction.atomic
 def Register(request):
     """
-    User registration:
-    - First account must be Admin
-    - Admins can create any role; Landlords can only create tenants
-    - Auto-creates matching Landlord/Tenant profile on successful registration
+    Unified user registration endpoint.
+    - First account ever created MUST be an admin
+    - Admins can create admin/landlord/tenant accounts
+    - Landlords can only create tenant accounts
+    - Automatically creates matching Landlord/Tenant profile on success
+    - Uses atomic transaction to avoid partial creation if anything fails
     """
     serializer = UserRegistrationSerializer(data=request.data)
     if not serializer.is_valid():
@@ -89,11 +109,11 @@ def Register(request):
     requested_role = data["role"]
     user_count = User.objects.count()
 
-    # Enforce first account is admin
+    # Enforce system setup rule: first user is always admin
     if user_count == 0 and requested_role != "admin":
         return Response({"error": "First account created must be an Admin."}, status=status.HTTP_403_FORBIDDEN)
 
-    # Enforce role-based creation rules
+    # Enforce role-based creation limits for existing systems
     if user_count > 0:
         if not request.user.is_authenticated:
             return Response({"error": "Authentication required to register new users."}, status=status.HTTP_401_UNAUTHORIZED)
@@ -107,7 +127,7 @@ def Register(request):
             return Response({"error": f"As {request.user.role}, you can only register: {', '.join(allowed)}"}, status=status.HTTP_403_FORBIDDEN)
 
     try:
-        # Create core user account
+        # Create core user account with correct permissions
         user = User.objects.create_user(
             email=data["email"],
             username=data.get("username") or data["email"].split("@")[0],
@@ -118,7 +138,7 @@ def Register(request):
             is_superuser=(requested_role == "admin")
         )
 
-        # Create linked profile for landlord/tenant
+        # Create and populate linked Landlord profile
         if requested_role == "landlord":
             Landlord.objects.get_or_create(user=user, defaults={
                 "full_name": request.data.get("full_name", ""),
@@ -138,6 +158,7 @@ def Register(request):
             profile.license_number = request.data.get("license_number", profile.license_number)
             profile.save()
 
+        # Create and populate linked Tenant profile
         elif requested_role == "tenant":
             Tenant.objects.get_or_create(user=user, defaults={
                 "full_name": request.data.get("full_name", ""),
@@ -166,7 +187,12 @@ def Register(request):
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def Login(request):
-    """Authenticate user and return JWT access/refresh tokens + profile data"""
+    """
+    Public login endpoint.
+    Accepts email + password, returns JWT access/refresh tokens.
+    Also includes full profile data for the logged-in user's role.
+    Tokens are used for all authenticated requests.
+    """
     email = request.data.get("email")
     password = request.data.get("password")
 
@@ -180,7 +206,7 @@ def Login(request):
     refresh = RefreshToken.for_user(user)
     profile_data = {}
 
-    # Attach role-specific profile data
+    # Attach role-specific profile data to response
     if user.role == "landlord" and hasattr(user, "landlord_profile"):
         profile_data = LandlordProfileSerializer(user.landlord_profile).data
     elif user.role == "tenant" and hasattr(user, "tenant"):
@@ -198,7 +224,12 @@ def Login(request):
 @api_view(["GET", "PUT", "PATCH"])
 @permission_classes([IsAuthenticated])
 def ProfileView(request):
-    """Fetch or update logged-in user's profile (landlord/tenant only)"""
+    """
+    Get or update the logged-in user's own profile.
+    - Admins do not have a separate profile record
+    - Supports full update (PUT) or partial update (PATCH)
+    - Users can only edit their own profile
+    """
     user = request.user
 
     if user.role == "admin":
@@ -239,14 +270,184 @@ def ProfileView(request):
 
 
 # ==================================================
+# Rental Request Management
+# ==================================================
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def rental_request_list_create(request):
+    """
+    Submit or view rental applications for properties.
+    - POST: Tenants only; auto-links request to property's landlord; blocks duplicate pending requests
+    - GET: Tenants see their own requests; landlords see requests for their properties; admins see all
+    """
+    user = request.user
+
+    if request.method == 'POST':
+        if user.role != 'tenant' or not hasattr(user, "tenant"):
+            return Response({"error": "Only tenants can submit rental requests."}, status=status.HTTP_403_FORBIDDEN)
+
+        serializer = RentalRequestSerializer(data=request.data, context={'request': request})
+        if serializer.is_valid():
+            # Auto-set tenant and landlord from selected property
+            property_obj = serializer.validated_data['property']
+            serializer.save(tenant=user.tenant, landlord=property_obj.landlord)
+            return Response({"message": "Rental request submitted successfully", "request": serializer.data}, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    # Filter requests based on user role
+    if user.role == 'admin':
+        requests = RentalRequest.objects.all().order_by('-created_at')
+    elif user.role == 'landlord' and hasattr(user, "landlord_profile"):
+        requests = RentalRequest.objects.filter(landlord=user.landlord_profile).order_by('-created_at')
+    elif user.role == 'tenant' and hasattr(user, "tenant"):
+        requests = RentalRequest.objects.filter(tenant=user.tenant).order_by('-created_at')
+    else:
+        requests = RentalRequest.objects.none()
+
+    serializer = RentalRequestSerializer(requests, many=True)
+    return Response({"rental_requests": serializer.data}, status=status.HTTP_200_OK)
+
+
+@api_view(['GET', 'PUT', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def rental_request_detail(request, request_id):
+    """
+    View, update, or delete a specific rental request.
+    - Landlords can approve/reject and add notes
+    - Tenants can only view or withdraw their own pending requests
+    """
+    user = request.user
+
+    try:
+        req = RentalRequest.objects.get(id=request_id)
+    except RentalRequest.DoesNotExist:
+        return Response({"error": "Rental request not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    # Access control checks
+    if user.role == 'tenant' and hasattr(user, "tenant"):
+        if req.tenant != user.tenant:
+            return Response({"error": "You can only access your own rental requests."}, status=status.HTTP_403_FORBIDDEN)
+        # Tenants can only delete pending requests
+        if request.method == 'PUT':
+            return Response({"error": "Tenants cannot edit requests — only landlords can approve/reject."}, status=status.HTTP_403_FORBIDDEN)
+        if request.method == 'DELETE' and req.status != 'PENDING':
+            return Response({"error": "Only pending requests can be withdrawn."}, status=status.HTTP_403_FORBIDDEN)
+
+    elif user.role == 'landlord' and hasattr(user, "landlord_profile"):
+        if req.landlord != user.landlord_profile:
+            return Response({"error": "You can only manage requests for your own properties."}, status=status.HTTP_403_FORBIDDEN)
+
+    if request.method == 'GET':
+        serializer = RentalRequestSerializer(req)
+        return Response({"rental_request": serializer.data}, status=status.HTTP_200_OK)
+
+    if request.method == 'PUT':
+        serializer = RentalRequestSerializer(req, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response({"message": "Request updated successfully", "rental_request": serializer.data}, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    if request.method == 'DELETE':
+        req.delete()
+        return Response({"message": "Request deleted successfully."}, status=status.HTTP_200_OK)
+
+
+# ==================================================
+# Meeting & Viewing Scheduling
+# ==================================================
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def meeting_list_create(request):
+    """
+    Schedule or view property meetings/viewings.
+    - POST: Landlords can schedule for any tenant; tenants can only schedule for themselves
+    - Supports viewings for new applicants or meetings for existing tenants
+    """
+    user = request.user
+
+    if request.method == 'POST':
+        serializer = MeetingSerializer(data=request.data, context={'request': request})
+        if serializer.is_valid():
+            property_obj = serializer.validated_data['property']
+            # Auto-set landlord from property
+            if user.role == 'landlord' and hasattr(user, "landlord_profile"):
+                if property_obj.landlord != user.landlord_profile:
+                    return Response({"error": "You can only schedule meetings for your own properties."}, status=status.HTTP_403_FORBIDDEN)
+                serializer.save(landlord=user.landlord_profile)
+            elif user.role == 'tenant' and hasattr(user, "tenant"):
+                serializer.save(tenant=user.tenant, landlord=property_obj.landlord)
+            else:
+                return Response({"error": "Only landlords and tenants can schedule meetings."}, status=status.HTTP_403_FORBIDDEN)
+
+            return Response({"message": "Meeting scheduled successfully", "meeting": serializer.data}, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    # Filter meetings based on role
+    if user.role == 'admin':
+        meetings = Meeting.objects.all().order_by('-date_time')
+    elif user.role == 'landlord' and hasattr(user, "landlord_profile"):
+        meetings = Meeting.objects.filter(landlord=user.landlord_profile).order_by('-date_time')
+    elif user.role == 'tenant' and hasattr(user, "tenant"):
+        meetings = Meeting.objects.filter(Q(tenant=user.tenant) | Q(tenant__isnull=True, property__landlord__isnull=False)).order_by('-date_time')
+    else:
+        meetings = Meeting.objects.none()
+
+    serializer = MeetingSerializer(meetings, many=True)
+    return Response({"meetings": serializer.data}, status=status.HTTP_200_OK)
+
+
+@api_view(['GET', 'PUT', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def meeting_detail(request, meeting_id):
+    """
+    View, reschedule, or cancel a single meeting.
+    - Tenants can only view or cancel their own meetings
+    - Landlords can edit/cancel meetings for their properties
+    """
+    user = request.user
+
+    try:
+        meeting = Meeting.objects.get(id=meeting_id)
+    except Meeting.DoesNotExist:
+        return Response({"error": "Meeting not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    # Access rules
+    if user.role == 'tenant' and hasattr(user, "tenant"):
+        if meeting.tenant and meeting.tenant != user.tenant:
+            return Response({"error": "You can only access meetings you are part of."}, status=status.HTTP_403_FORBIDDEN)
+    elif user.role == 'landlord' and hasattr(user, "landlord_profile"):
+        if meeting.landlord != user.landlord_profile:
+            return Response({"error": "You can only manage meetings for your own properties."}, status=status.HTTP_403_FORBIDDEN)
+
+    if request.method == 'GET':
+        serializer = MeetingSerializer(meeting)
+        return Response({"meeting": serializer.data}, status=status.HTTP_200_OK)
+
+    if request.method == 'PUT':
+        serializer = MeetingSerializer(meeting, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response({"message": "Meeting updated successfully", "meeting": serializer.data}, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    if request.method == 'DELETE':
+        meeting.delete()
+        return Response({"message": "Meeting cancelled successfully."}, status=status.HTTP_200_OK)
+
+
+# ==================================================
 # Lease Management
 # ==================================================
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def lease_list_create(request):
     """
-    - GET: List leases filtered by user role
-    - POST: Admin/landlord can create leases; auto-updates property occupancy status
+    List or create lease agreements.
+    - GET: Shows only leases relevant to your role (admin sees all)
+    - POST: Only admins/landlords can create leases
+    - Automatically marks property as OCCUPIED when lease is set to ACTIVE
+    - Landlords can only create leases for their own properties
     """
     user = request.user
 
@@ -258,12 +459,13 @@ def lease_list_create(request):
         if serializer.is_valid():
             property_obj = serializer.validated_data['property']
 
+            # Enforce property ownership check for landlords
             if user.role == 'landlord' and property_obj.landlord != getattr(user, "landlord_profile", None):
                 return Response({"error": "You can only create leases for your own properties."}, status=status.HTTP_403_FORBIDDEN)
 
             lease = serializer.save()
 
-            # Mark property as occupied when lease is active
+            # Sync property status when lease becomes active
             if lease.status == "ACTIVE":
                 property_obj.status = "OCCUPIED"
                 property_obj.save(update_fields=['status'])
@@ -272,7 +474,7 @@ def lease_list_create(request):
 
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-    # Role-based lease filtering
+    # Filter leases based on user role
     if user.role == 'admin':
         leases = Lease.objects.all().order_by('-created_at')
     elif user.role == 'landlord' and hasattr(user, "landlord_profile"):
@@ -289,7 +491,12 @@ def lease_list_create(request):
 @api_view(['GET', 'PUT', 'DELETE'])
 @permission_classes([IsAuthenticated])
 def lease_detail(request, lease_id):
-    """View, update, or delete a single lease; syncs property occupancy status"""
+    """
+    View, update, or delete a single lease.
+    - Automatically syncs property occupancy status when lease status changes
+    - Tenants can only view, not edit or delete
+    - Landlords can only manage leases for their own properties
+    """
     user = request.user
 
     try:
@@ -297,7 +504,7 @@ def lease_detail(request, lease_id):
     except Lease.DoesNotExist:
         return Response({"error": "Lease not found."}, status=status.HTTP_404_NOT_FOUND)
 
-    # Access controls
+    # Access control checks
     if user.role == 'landlord' and hasattr(user, "landlord_profile") and lease.property.landlord != user.landlord_profile:
         return Response({"error": "You can only access leases for your own properties."}, status=status.HTTP_403_FORBIDDEN)
     if user.role == 'tenant' and hasattr(user, "tenant") and lease.tenant != user.tenant:
@@ -314,7 +521,7 @@ def lease_detail(request, lease_id):
         serializer = LeaseSerializer(lease, data=request.data, partial=True)
         if serializer.is_valid():
             updated_lease = serializer.save()
-            # Update property status based on lease status
+            # Update property status to match new lease status
             updated_lease.property.status = "OCCUPIED" if updated_lease.status == "ACTIVE" else "AVAILABLE"
             updated_lease.property.save(update_fields=['status'])
 
@@ -326,11 +533,12 @@ def lease_detail(request, lease_id):
         if user.role not in ['admin', 'landlord']:
             return Response({"error": "Only admins and landlords can delete leases."}, status=status.HTTP_403_FORBIDDEN)
 
+        # Mark property as available when lease is removed
         lease.property.status = "AVAILABLE"
         lease.property.save(update_fields=['status'])
         lease.delete()
 
-        return Response({"message": "Lease deleted successfully."}, status=status.HTTP_200_OK)
+        return Response({"message": "Lease deleted successfully."})
 
 
 # ==================================================
@@ -340,8 +548,9 @@ def lease_detail(request, lease_id):
 @permission_classes([IsAuthenticated])
 def notice_list_create(request):
     """
-    - GET: Tenants see public notices; creators see their own; admins see all
-    - POST: Only admins/landlords can create notices
+    List or create system notices/announcements.
+    - GET: Tenants see public notices; landlords see only their own
+    - POST: Only admins and landlords can publish notices
     """
     user = request.user
 
@@ -355,7 +564,7 @@ def notice_list_create(request):
             return Response({"message": "Notice created successfully", "notice": serializer.data}, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-    # Role-based filtering
+    # Filter notices based on role
     if user.role == 'admin':
         notices = Notice.objects.all().order_by('-created_at')
     elif user.role == 'landlord':
@@ -372,7 +581,11 @@ def notice_list_create(request):
 @api_view(['GET', 'PUT', 'DELETE'])
 @permission_classes([IsAuthenticated])
 def notice_detail(request, notice_id):
-    """View or manage a single notice; tenants can only view"""
+    """
+    Manage a single notice.
+    - Tenants can only view, cannot modify or delete
+    - Landlords can only edit/delete notices they created themselves
+    """
     user = request.user
 
     try:
@@ -380,7 +593,7 @@ def notice_detail(request, notice_id):
     except Notice.DoesNotExist:
         return Response({"error": "Notice not found."}, status=status.HTTP_404_NOT_FOUND)
 
-    # Permissions
+    # Permission checks
     if user.role == 'tenant':
         if request.method != 'GET':
             return Response({"error": "Tenants cannot modify or delete notices."}, status=status.HTTP_403_FORBIDDEN)
@@ -410,7 +623,8 @@ def notice_detail(request, notice_id):
 @permission_classes([IsAuthenticated])
 def maintenance_list_create(request):
     """
-    - GET: Filter requests by user role
+    List or submit property maintenance requests.
+    - GET: Filtered to show only requests relevant to your role
     - POST: Only tenants can submit new requests
     """
     user = request.user
@@ -425,7 +639,7 @@ def maintenance_list_create(request):
             return Response({"message": "Maintenance request submitted successfully", "maintenance": serializer.data}, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-    # Role-based filtering
+    # Filter requests by role
     if user.role == 'admin':
         requests = Maintenance.objects.all().order_by('-created_at')
     elif user.role == 'landlord' and hasattr(user, "landlord_profile"):
@@ -442,7 +656,11 @@ def maintenance_list_create(request):
 @api_view(['GET', 'PUT', 'DELETE'])
 @permission_classes([IsAuthenticated])
 def maintenance_detail(request, maintenance_id):
-    """View, update, or delete a single maintenance request"""
+    """
+    View, update, or delete a single maintenance request.
+    - Tenants can only view their own requests, cannot delete
+    - Landlords can update status and manage requests for their properties
+    """
     user = request.user
 
     try:
@@ -450,7 +668,7 @@ def maintenance_detail(request, maintenance_id):
     except Maintenance.DoesNotExist:
         return Response({"error": "Maintenance request not found."}, status=status.HTTP_404_NOT_FOUND)
 
-    # Access controls
+    # Access rules
     if user.role == 'tenant':
         if not hasattr(user, "tenant") or req.tenant != user.tenant:
             return Response({"error": "You can only access your own maintenance requests."}, status=status.HTTP_403_FORBIDDEN)
@@ -476,7 +694,7 @@ def maintenance_detail(request, maintenance_id):
         if user.role not in ['admin', 'landlord']:
             return Response({"error": "Only admins and landlords can delete requests."}, status=status.HTTP_403_FORBIDDEN)
         req.delete()
-        return Response({"message": "Maintenance request deleted successfully."}, status=status.HTTP_200_OK)   
+        return Response({"message": "Maintenance request deleted successfully."})   
 
 
 # ==================================================
@@ -486,8 +704,10 @@ def maintenance_detail(request, maintenance_id):
 @permission_classes([IsAuthenticated])
 def payment_list_create(request):
     """
-    - POST: Tenants submit payments; auto-calculates covered months & pending status
-    - GET: View payment history + summary stats filtered by role
+    Submit rent payments or view payment history.
+    - POST: Tenants only; auto-calculates which months payment covers (oldest first)
+    - GET: Includes summary stats for collected/pending amounts
+    - Enforces rule: clear old balances before paying new months
     """
     user = request.user
 
@@ -499,7 +719,7 @@ def payment_list_create(request):
         if serializer.is_valid():
             lease = serializer.validated_data['lease']
 
-            # Validate lease eligibility
+            # Ensure tenant is paying for their own active lease
             if lease.tenant_id != user.tenant.id:
                 return Response({"error": "You can only make payments for your own active leases."}, status=status.HTTP_403_FORBIDDEN)
             if lease.status != "ACTIVE":
@@ -509,7 +729,7 @@ def payment_list_create(request):
 
             payment = serializer.save()
 
-            # Calculate which months this payment covers (oldest first)
+            # Auto-calculate which months this payment covers
             monthly_rent = Decimal(lease.monthly_rent)
             paid_amount = Decimal(payment.amount)
             covered_months = []
@@ -523,12 +743,12 @@ def payment_list_create(request):
             payment.covered_months = covered_months
             payment.save(update_fields=['covered_months'])
 
-            # Calculate balance status
+            # Calculate current balance status
             total_completed = lease.payments.filter(status='COMPLETED').aggregate(total=Sum('amount'))['total'] or Decimal('0')
             total_effective = total_completed + paid_amount
             new_balance = max(Decimal('0'), lease.monthly_rent - total_effective)
 
-            # Build user-friendly response
+            # Build clear user response
             months_text = ", ".join(covered_months) if covered_months else ""
             extra_note = f" plus KSh {remaining:.2f} as advance credit" if remaining > 0 else ""
             success_msg = f"Payment submitted successfully! This covers: {months_text}{extra_note}. Awaiting verification." if covered_months else "Payment submitted successfully, awaiting verification."
@@ -547,7 +767,7 @@ def payment_list_create(request):
 
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-    # GET: Filtered payment history with summary
+    # Filter payment history based on role
     if user.role == 'admin':
         payments = Payment.objects.all().select_related('lease', 'lease__tenant', 'lease__property')
     elif user.role == 'landlord' and hasattr(user, "landlord_profile"):
@@ -557,7 +777,7 @@ def payment_list_create(request):
     else:
         payments = Payment.objects.none()
 
-    # Apply query filters
+    # Apply optional URL filters
     status_filter = request.query_params.get('status')
     lease_id = request.query_params.get('lease_id')
     tenant_id = request.query_params.get('tenant_id')
@@ -565,7 +785,7 @@ def payment_list_create(request):
     if lease_id: payments = payments.filter(lease_id=lease_id)
     if tenant_id and user.role in ['admin', 'landlord']: payments = payments.filter(lease__tenant_id=tenant_id)
 
-    # Calculate summary stats
+    # Calculate summary figures for dashboard
     total_paid = sum(p.amount for p in payments.filter(status='COMPLETED')) or Decimal('0.00')
     total_pending = sum(p.amount for p in payments.filter(status='PENDING')) or Decimal('0.00')
     monthly_rent = payments.first().lease.monthly_rent if payments.exists() else Decimal('0.00')
@@ -589,13 +809,17 @@ def payment_list_create(request):
 @api_view(['GET', 'PUT', 'DELETE'])
 @permission_classes([IsAuthenticated])
 def payment_detail(request, payment_id):
-    """View, update, or delete a single payment; receipt fields auto-set on verification"""
+    """
+    Manage a single payment record.
+    - Tenants can only view, cannot edit or delete
+    - Receipt fields are auto-generated when payment is verified
+    """
     try:
         payment = Payment.objects.select_related('lease', 'lease__property', 'lease__tenant').get(id=payment_id)
     except Payment.DoesNotExist:
         return Response({"error": "Payment not found."}, status=status.HTTP_404_NOT_FOUND)
 
-    # Access controls
+    # Access rules
     if request.user.role == 'tenant' and hasattr(request.user, "tenant"):
         if payment.lease.tenant != request.user.tenant:
             return Response({"error": "Access denied."}, status=status.HTTP_403_FORBIDDEN)
@@ -626,45 +850,90 @@ def payment_detail(request, payment_id):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def rent_for_month(request):
-    """Check if a specific month's rent is paid or payable (format: ?month=2026-08)"""
+    """
+    Check rent status for a specific month and active lease.
+    Usage:
+        /api/core/rent-for-month/?lease_id=1&month=2026-07
+    Returns rent amount, payment status, and balance for that period.
+    """
+    # Get query parameters
     month = request.query_params.get('month')
-    if not month:
-        return Response({"error": "Please provide month like: ?month=2026-08"}, status=status.HTTP_400_BAD_REQUEST)
+    lease_id = request.query_params.get('lease_id')
 
+    # Validate required params
+    if not month:
+        return Response(
+            {"error": "Please provide month in format: ?month=2026-07"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    if not lease_id:
+        return Response(
+            {"error": "Please provide lease ID: ?lease_id=1&month=2026-07"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    # Validate month format
     try:
         target_date = datetime.strptime(month, "%Y-%m").date()
-    except:
-        return Response({"error": "Invalid format. Use: ?month=2026-08"}, status=status.HTTP_400_BAD_REQUEST)
+    except ValueError:
+        return Response(
+            {"error": "Invalid date format. Use: ?month=2026-07"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
 
-    if request.user.role == 'tenant' and hasattr(request.user, "tenant") and request.user.is_active:
-        lease = Lease.objects.filter(tenant=request.user.tenant, status='ACTIVE').first()
-        if not lease:
-            return Response({"error": "No active lease found."}, status=status.HTTP_404_NOT_FOUND)
-        if target_date < lease.start_date or target_date > lease.end_date:
-            return Response({"error": "This month is not covered by your lease period."}, status=status.HTTP_400_BAD_REQUEST)
+    # Only allow active tenants
+    if request.user.role != 'tenant' or not hasattr(request.user, "tenant"):
+        return Response(
+            {"error": "Only tenants can check rent status."},
+            status=status.HTTP_403_FORBIDDEN
+        )
 
-        month_name = target_date.strftime("%B %Y")
-        total_paid = lease.payments.filter(status='COMPLETED').aggregate(Sum('amount'))['total'] or Decimal('0')
-        paid_for_this = total_paid >= lease.monthly_rent
+    # Get the specific lease belonging to this tenant
+    try:
+        lease = Lease.objects.get(
+            id=lease_id,
+            tenant=request.user.tenant,
+            status='ACTIVE'
+        )
+    except Lease.DoesNotExist:
+        return Response(
+            {"error": "Active lease not found or you do not have permission to access it."},
+            status=status.HTTP_404_NOT_FOUND
+        )
 
-        return Response({
-            "month": month_name,
-            "monthly_rent": f"{lease.monthly_rent:.2f}",
-            "status": "PAID" if paid_for_this else "PAYABLE",
-            "amount_to_pay": "0.00" if paid_for_this else f"{lease.monthly_rent:.2f}",
-            "note": "Payments clear oldest balance first."
-        })
+    # Check month falls within lease period
+    if target_date < lease.start_date or target_date > lease.end_date:
+        return Response(
+            {"error": f"This lease runs from {lease.start_date} to {lease.end_date} — the requested month is outside this range."},
+            status=status.HTTP_400_BAD_REQUEST
+        )
 
-    return Response({"error": "Only active tenants can check this information."}, status=status.HTTP_403_FORBIDDEN)
+    # Calculate totals
+    total_paid = lease.payments.filter(status='COMPLETED').aggregate(
+        Sum('amount')
+    )['total'] or Decimal('0.00')
+    paid_for_this = total_paid >= lease.monthly_rent
 
+    # Return consistent response
+    return Response({
+        "month": target_date.strftime("%B %Y"),
+        "lease_id": lease.id,
+        "property": lease.property.title,
+        "monthly_rent": float(lease.monthly_rent),
+        "total_paid": float(total_paid),
+        "status": "PAID" if paid_for_this else "PAYABLE",
+        "amount_due": float(Decimal('0.00') if paid_for_this else lease.monthly_rent - total_paid),
+        "note": "Payments are applied to the oldest outstanding balance first."
+    })
 
 @api_view(['PUT'])
 @permission_classes([IsAuthenticated])
 def verify_payment(request, payment_id):
     """
-    Landlord/Admin verifies pending payments:
-    - Sets status to COMPLETED/FAILED
-    - Auto-generates receipt number, timestamp & balance data for COMPLETED payments
+    Verify pending payments (landlord/admin only).
+    - Sets status to COMPLETED or FAILED
+    - Auto-generates unique receipt number and timestamp for COMPLETED payments
+    - Recalculates covered months and final balance
     """
     try:
         payment = Payment.objects.select_related('lease', 'lease__property', 'lease__tenant').get(id=payment_id)
@@ -672,14 +941,14 @@ def verify_payment(request, payment_id):
         return Response({"error": "Payment not found"}, status=status.HTTP_404_NOT_FOUND)
 
     user = request.user
-    # Permissions
+    # Permission checks
     if user.role == 'tenant':
         return Response({"error": "Only landlords or admins can verify payments"}, status=status.HTTP_403_FORBIDDEN)
     if user.role == 'landlord' and hasattr(user, 'landlord_profile'):
         if payment.lease.property.landlord != user.landlord_profile:
             return Response({"error": "You can only verify payments for your own properties"}, status=status.HTTP_403_FORBIDDEN)
 
-    # Validation
+    # Validate input
     if payment.status != 'PENDING':
         return Response({"error": "Only pending payments can be verified"}, status=status.HTTP_400_BAD_REQUEST)
     new_status = request.data.get('status')
@@ -688,12 +957,12 @@ def verify_payment(request, payment_id):
 
     payment.status = new_status
 
-    # Generate receipt details only for successful payments
+    # Generate official receipt details only for successful payments
     if new_status == 'COMPLETED':
         payment.receipt_number = f"RCPT-{timezone.now().strftime('%Y%m%d')}-{payment.id:06d}"
         payment.receipt_issued_at = timezone.now()
 
-        # Recalculate covered months
+        # Recalculate covered months for verification
         monthly_rent = payment.lease.monthly_rent
         paid_amount = payment.amount
         covered = []
@@ -705,7 +974,7 @@ def verify_payment(request, payment_id):
             current = current.replace(year=current.year + 1, month=1) if current.month == 12 else current.replace(month=current.month + 1)
         payment.covered_months = covered
 
-        # Update post-payment balance
+        # Update final balance after this payment
         total_paid = Payment.objects.filter(lease=payment.lease, status='COMPLETED').aggregate(total=Sum('amount'))['total'] or Decimal('0')
         payment.balance_after_payment = max(Decimal('0'), monthly_rent - total_paid)
 
@@ -723,7 +992,7 @@ def verify_payment(request, payment_id):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def admin_all_users(request):
-    """List all system users (admin only)"""
+    """List every user account in the system — admin access only"""
     if request.user.role != 'admin':
         return Response({"error": "Access denied"}, status=status.HTTP_403_FORBIDDEN)
 
@@ -734,36 +1003,39 @@ def admin_all_users(request):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def admin_dashboard_stats(request):
-    """Aggregated system-wide stats for admin overview"""
+    """
+    Get full system-wide statistics for admin overview.
+    Includes users, properties, leases, maintenance, and payment totals.
+    """
     if request.user.role != 'admin':
         return Response({"error": "Admin access required"}, status=403)
 
-    # User counts
+    # User breakdown
     total_users = User.objects.count()
     admin_count = User.objects.filter(role='admin').count()
     landlord_count = User.objects.filter(role='landlord').count()
     tenant_count = User.objects.filter(role='tenant').count()
 
-    # Property stats
+    # Property status breakdown
     total_properties = Property.objects.count()
     available = Property.objects.filter(status='VACANT').count()
     occupied = Property.objects.filter(status='OCCUPIED').count()
     under_repair = Property.objects.filter(status='MAINTENANCE').count()
     occupancy_rate = f"{(occupied / total_properties * 100):.0f}%" if total_properties > 0 else "0%"
 
-    # Lease stats
+    # Lease status breakdown
     total_leases = Lease.objects.count()
     active_leases = Lease.objects.filter(status='ACTIVE').count()
     pending_leases = Lease.objects.filter(status='PENDING').count()
     expired_leases = Lease.objects.filter(status='EXPIRED').count()
     terminated_leases = Lease.objects.filter(status='TERMINATED').count()
 
-    # Maintenance stats
+    # Maintenance summary
     total_maint = Maintenance.objects.count()
     pending_maint = Maintenance.objects.filter(status__in=['PENDING', 'IN_PROGRESS']).count()
     completed_maint = Maintenance.objects.filter(status='COMPLETED').count()
 
-    # Payment stats
+    # Financial summary
     total_collected = Payment.objects.filter(status='COMPLETED').aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
     pending_amount = Payment.objects.filter(status='PENDING').aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
     expected_rent = Lease.objects.filter(status='ACTIVE').aggregate(total=Sum('monthly_rent'))['total'] or Decimal('0.00')

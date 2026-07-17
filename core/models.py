@@ -1,9 +1,12 @@
 from django.db import models
 from django.contrib.auth.models import AbstractUser
 from decimal import Decimal
-from django.db import models
-from django.contrib.auth.models import AbstractUser
+from datetime import datetime
 
+
+# ------------------------------
+# Custom User Model
+# ------------------------------
 class User(AbstractUser):
     ROLE_CHOICES = (
         ('admin', 'System Admin'),
@@ -15,7 +18,7 @@ class User(AbstractUser):
     email = models.EmailField(max_length=50, unique=True)
     profile_picture = models.ImageField(upload_to='profiles/', null=True, blank=True)
 
-    # Fix reverse accessor conflict
+    # Fix reverse accessor conflict with Django auth
     groups = models.ManyToManyField(
         'auth.Group',
         related_name='core_user_groups',
@@ -39,7 +42,7 @@ class User(AbstractUser):
 
 
 # ------------------------------
-# Landlord Model
+# Landlord Profile Model
 # ------------------------------
 class Landlord(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='landlord_profile')
@@ -59,7 +62,7 @@ class Landlord(models.Model):
 
 
 # ------------------------------
-# Tenant Model
+# Tenant Profile Model
 # ------------------------------
 class Tenant(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='tenant')
@@ -105,45 +108,80 @@ class Property(models.Model):
 # Rental Request Model
 # ------------------------------
 class RentalRequest(models.Model):
+    """Tenant request to rent a specific property; landlord approves/rejects"""
     STATUS_CHOICES = (
         ('PENDING', 'Pending'),
         ('APPROVED', 'Approved'),
         ('REJECTED', 'Rejected'),
     )
-    property = models.ForeignKey(Property, on_delete=models.CASCADE)
-    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE)
-    message = models.TextField()
+
+    property = models.ForeignKey(
+        Property,
+        on_delete=models.CASCADE,
+        related_name='rental_requests',
+        help_text="Property the tenant is applying for"
+    )
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name='rental_applications',
+        help_text="Tenant submitting the request"
+    )
+    landlord = models.ForeignKey(
+        Landlord,
+        on_delete=models.CASCADE,
+        related_name='incoming_requests',
+        editable=False,
+        help_text="Auto-set from property owner"
+    )
+    message = models.TextField(blank=True, null=True, help_text="Tenant's application note")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='PENDING')
+    landlord_notes = models.TextField(blank=True, null=True, help_text="Landlord feedback")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        unique_together = ['property', 'tenant']
+        verbose_name = "Rental Request"
+        verbose_name_plural = "Rental Requests"
+
+    def __str__(self):
+        return f"Request: {self.property.title} ↔ {self.tenant.full_name} ({self.status})"
+
+    def save(self, *args, **kwargs):
+        """Auto-populate landlord from linked property"""
+        if not self.landlord_id:
+            self.landlord = self.property.landlord
+        super().save(*args, **kwargs)
+
+
+# ------------------------------
+# Meeting / Viewing Model
+# ------------------------------
+class Meeting(models.Model):
+    """Scheduled property viewings or meetings between landlord and tenant/applicant"""
+    STATUS_CHOICES = (
+        ('PENDING', 'Pending'),
+        ('SCHEDULED', 'Scheduled'),
+        ('COMPLETED', 'Completed'),
+        ('CANCELLED', 'Cancelled'),
+    )
+    landlord = models.ForeignKey(Landlord, on_delete=models.CASCADE, related_name='meetings')
+    tenant = models.ForeignKey(Tenant, on_delete=models.SET_NULL, null=True, blank=True, related_name='meetings')
+    property = models.ForeignKey(Property, on_delete=models.CASCADE, related_name='meetings')
+    date_time = models.DateTimeField(help_text="Date and time of the meeting/viewing")
+    notes = models.TextField(blank=True, null=True, help_text="Agenda or special instructions")
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='PENDING')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
-        return f"Request for {self.property.title} by {self.tenant.full_name}"
+        return f"Meeting: {self.property.title} — {self.date_time.strftime('%Y-%m-%d %H:%M')}"
 
 
 # ------------------------------
-# Meeting Model
-# ------------------------------
-class Meeting(models.Model):
-    STATUS_CHOICES = (
-        ('SCHEDULED', 'Scheduled'),
-        ('COMPLETED', 'Completed'),
-        ('CANCELLED', 'Cancelled'),
-    )
-    property = models.ForeignKey(Property, on_delete=models.CASCADE)
-    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE)
-    landlord = models.ForeignKey(Landlord, on_delete=models.CASCADE)
-    date_time = models.DateTimeField()
-    notes = models.TextField(blank=True, null=True)
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='SCHEDULED')
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    def __str__(self):
-        return f"Meeting on {self.date_time.strftime('%Y-%m-%d')}"
-
-
-# ------------------------------
-# Lease Model
+# Lease Agreement Model
 # ------------------------------
 class Lease(models.Model):
     property = models.ForeignKey(Property, on_delete=models.CASCADE, related_name='leases')
@@ -182,18 +220,17 @@ class Payment(models.Model):
     transaction_id = models.CharField(max_length=100, blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    # --- NEW RECEIPT FIELDS — added ONLY here ---
     receipt_number = models.CharField(max_length=20, unique=True, null=True, blank=True)
     receipt_issued_at = models.DateTimeField(null=True, blank=True)
     covered_months = models.JSONField(default=list, blank=True)
     balance_after_payment = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
 
     def __str__(self):
-        return f"{self.lease.tenant.full_name} - {self.amount}"
+        return f"{self.lease.tenant.full_name} - KSh {self.amount}"
 
 
 # ------------------------------
-# Maintenance Model
+# Maintenance Request Model
 # ------------------------------
 class Maintenance(models.Model):
     property = models.ForeignKey(Property, on_delete=models.CASCADE, related_name='maintenance_requests')
@@ -214,7 +251,7 @@ class Maintenance(models.Model):
 
 
 # ------------------------------
-# Notice Model
+# System Notice Model
 # ------------------------------
 class Notice(models.Model):
     title = models.CharField(max_length=200)
