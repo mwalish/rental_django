@@ -5,6 +5,7 @@
 Shared utilities and model imports for all serializers in the core app.
 All serializers follow consistent naming, validation, and permission patterns.
 """
+from jsonschema import ValidationError
 from rest_framework import serializers
 from django.contrib.auth.password_validation import validate_password
 from django.db.models import Sum, F
@@ -99,32 +100,105 @@ class LandlordCreateSerializer(serializers.ModelSerializer):
         return user
 
 
+# class TenantCreateSerializer(serializers.ModelSerializer):
+#     """
+#     Landlord-only serializer to create new Tenant accounts.
+#     Automatically sets role=tenant and creates linked Tenant profile.
+#     Used when landlords add tenants directly to their properties.
+#     """
+#     password = serializers.CharField(write_only=True, required=True, help_text="Tenant account password")
+#     password_confirm = serializers.CharField(write_only=True, required=True, help_text="Confirm password")
+
+#     class Meta:
+#         model = User
+#         fields = ['email', 'username', 'phone_number', 'password', 'password_confirm']
+
+#     def validate(self, data):
+#         if data['password'] != data['password_confirm']:
+#             raise serializers.ValidationError({"password": "Passwords do not match."})
+#         validate_password(data['password'])
+#         return data
+
+#     def create(self, validated_data):
+#         validated_data.pop('password_confirm')
+#         # Create core user account with tenant role
+#         user = User.objects.create_user(role='tenant', **validated_data)
+#         # Auto-create matching Tenant profile
+#         Tenant.objects.create(user=user, full_name=user.username, phone=user.phone_number, email_address=user.email)
+#         return user
 class TenantCreateSerializer(serializers.ModelSerializer):
     """
     Landlord-only serializer to create new Tenant accounts.
-    Automatically sets role=tenant and creates linked Tenant profile.
-    Used when landlords add tenants directly to their properties.
+    Automatically creates User + linked Tenant profile with all details.
     """
-    password = serializers.CharField(write_only=True, required=True, help_text="Tenant account password")
-    password_confirm = serializers.CharField(write_only=True, required=True, help_text="Confirm password")
+    password = serializers.CharField(
+        write_only=True,
+        required=True,
+        min_length=6,
+        help_text="Tenant account password"
+    )
+    password_confirm = serializers.CharField(
+        write_only=True,
+        required=True,
+        min_length=6,
+        help_text="Confirm password"
+    )
+
+    # Tenant profile extra fields
+    full_name = serializers.CharField(required=True, max_length=100)
+    id_number = serializers.CharField(required=True, max_length=20)
+    phone = serializers.CharField(required=True, max_length=20)
+    email_address = serializers.EmailField(required=False, allow_blank=True)
+    alternative_phone = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
     class Meta:
         model = User
-        fields = ['email', 'username', 'phone_number', 'password', 'password_confirm']
+        fields = [
+            'email', 'username', 'phone_number',
+            'password', 'password_confirm',
+            'full_name', 'id_number', 'phone',
+            'email_address', 'alternative_phone'
+        ]
 
     def validate(self, data):
+        # Match passwords
         if data['password'] != data['password_confirm']:
             raise serializers.ValidationError({"password": "Passwords do not match."})
-        validate_password(data['password'])
+        
+        # Validate password strength
+        try:
+            validate_password(data['password'])
+        except ValidationError as e:
+            raise serializers.ValidationError({"password": list(e.messages)})
+        
         return data
 
     def create(self, validated_data):
+        # Extract profile fields NOT part of User model
+        profile_data = {
+            'full_name': validated_data.pop('full_name'),
+            'id_number': validated_data.pop('id_number'),
+            'phone': validated_data.pop('phone'),
+            'email_address': validated_data.pop('email_address', validated_data.get('email')),
+            'alternative_phone': validated_data.pop('alternative_phone', None)
+        }
+
+        # Remove confirm password before creating user
         validated_data.pop('password_confirm')
-        # Create core user account with tenant role
-        user = User.objects.create_user(role='tenant', **validated_data)
-        # Auto-create matching Tenant profile
-        Tenant.objects.create(user=user, full_name=user.username, phone=user.phone_number, email_address=user.email)
-        return user
+
+        # Create User with tenant role
+        user = User.objects.create_user(
+            role='tenant',
+            **validated_data
+        )
+
+        # Create full Tenant profile with all details
+        tenant = Tenant.objects.create(
+            user=user,
+            **profile_data
+        )
+
+        return tenant
 
 
 # ==================================================

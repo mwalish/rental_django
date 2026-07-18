@@ -66,6 +66,24 @@ class AdminCreateLandlordView(APIView):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
+# class LandlordCreateTenantView(APIView):
+#     """
+#     Landlord-only endpoint to register new tenant accounts directly.
+#     Used when landlords add tenants to their properties without public sign-up.
+#     Permissions: Must be logged in as landlord.
+#     """
+#     permission_classes = [permissions.IsAuthenticated]
+
+#     def post(self, request):
+#         # Block non-landlord users
+#         if request.user.role != 'landlord':
+#             return Response({"error": "Only landlords can register tenants."}, status=status.HTTP_403_FORBIDDEN)
+
+#         serializer = TenantCreateSerializer(data=request.data)
+#         if serializer.is_valid():
+#             serializer.save()
+#             return Response({"message": "Tenant account created successfully."}, status=status.HTTP_201_CREATED)
+#         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 class LandlordCreateTenantView(APIView):
     """
     Landlord-only endpoint to register new tenant accounts directly.
@@ -75,15 +93,29 @@ class LandlordCreateTenantView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
-        # Block non-landlord users
+        # Block non-landlord users clearly
         if request.user.role != 'landlord':
-            return Response({"error": "Only landlords can register tenants."}, status=status.HTTP_403_FORBIDDEN)
+            return Response(
+                {"error": "Only landlords can register tenant accounts."},
+                status=status.HTTP_403_FORBIDDEN
+            )
 
         serializer = TenantCreateSerializer(data=request.data)
         if serializer.is_valid():
-            serializer.save()
-            return Response({"message": "Tenant account created successfully."}, status=status.HTTP_201_CREATED)
+            tenant = serializer.save()
+            return Response({
+                "message": "Tenant account created successfully.",
+                "tenant": {
+                    "id": tenant.user.id,
+                    "username": tenant.user.username,
+                    "full_name": tenant.full_name,
+                    "email": tenant.user.email,
+                    "phone": tenant.phone
+                }
+            }, status=status.HTTP_201_CREATED)
+        
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
 
 
 # ==================================================

@@ -65,15 +65,16 @@ class Landlord(models.Model):
 # Tenant Profile Model
 # ------------------------------
 class Tenant(models.Model):
-    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='tenant')
     full_name = models.CharField(max_length=100)
-    id_number = models.CharField(max_length=30, unique=True)
-    phone = models.CharField(max_length=15)
-    email_address = models.EmailField()
-    alternative_phone = models.CharField(max_length=15, blank=True, null=True)
-    join_date = models.DateField(null=True, blank=True)
-    exit_date = models.DateField(null=True, blank=True)
-    profile_picture = models.ImageField(upload_to='tenants/', null=True, blank=True)
+    id_number = models.CharField(max_length=20, unique=True)
+    phone = models.CharField(max_length=20)
+    email_address = models.EmailField(blank=True, null=True)
+    alternative_phone = models.CharField(max_length=20, blank=True, null=True)
+    # Auto-set dates — no more NULL values!
+    join_date = models.DateField(auto_now_add=True)
+    exit_date = models.DateField(blank=True, null=True)
+    profile_picture = models.ImageField(upload_to="tenants/", blank=True, null=True)
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="tenant")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
