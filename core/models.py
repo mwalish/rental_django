@@ -1,8 +1,8 @@
 from django.db import models
 from django.contrib.auth.models import AbstractUser
+from django.utils import timezone
 from decimal import Decimal
 from datetime import datetime
-
 
 # ------------------------------
 # Custom User Model
@@ -42,6 +42,23 @@ class User(AbstractUser):
 
 
 # ------------------------------
+# Password Reset Code Model
+# ------------------------------
+class PasswordResetCode(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE)
+    code = models.CharField(max_length=6)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    is_used = models.BooleanField(default=False)
+
+    def is_valid(self):
+        return not self.is_used and timezone.now() < self.expires_at
+
+    def __str__(self):
+        return f"Reset for {self.user.username} | Expires: {self.expires_at}"
+
+
+# ------------------------------
 # Landlord Profile Model
 # ------------------------------
 class Landlord(models.Model):
@@ -70,8 +87,7 @@ class Tenant(models.Model):
     phone = models.CharField(max_length=20)
     email_address = models.EmailField(blank=True, null=True)
     alternative_phone = models.CharField(max_length=20, blank=True, null=True)
-    # Auto-set dates — no more NULL values!
-    join_date = models.DateField(auto_now_add=True)
+    join_date = models.DateField(null=True, blank=True, verbose_name="Tenant Join Date")
     exit_date = models.DateField(blank=True, null=True)
     profile_picture = models.ImageField(upload_to="tenants/", blank=True, null=True)
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="tenant")
@@ -80,7 +96,6 @@ class Tenant(models.Model):
 
     def __str__(self):
         return self.full_name
-
 
 # ------------------------------
 # Property Model
@@ -109,7 +124,6 @@ class Property(models.Model):
 # Rental Request Model
 # ------------------------------
 class RentalRequest(models.Model):
-    """Tenant request to rent a specific property; landlord approves/rejects"""
     STATUS_CHOICES = (
         ('PENDING', 'Pending'),
         ('APPROVED', 'Approved'),
@@ -151,7 +165,6 @@ class RentalRequest(models.Model):
         return f"Request: {self.property.title} ↔ {self.tenant.full_name} ({self.status})"
 
     def save(self, *args, **kwargs):
-        """Auto-populate landlord from linked property"""
         if not self.landlord_id:
             self.landlord = self.property.landlord
         super().save(*args, **kwargs)
@@ -161,7 +174,6 @@ class RentalRequest(models.Model):
 # Meeting / Viewing Model
 # ------------------------------
 class Meeting(models.Model):
-    """Scheduled property viewings or meetings between landlord and tenant/applicant"""
     STATUS_CHOICES = (
         ('PENDING', 'Pending'),
         ('SCHEDULED', 'Scheduled'),

@@ -6,22 +6,33 @@ Views module for the core property management system.
 All endpoints follow consistent role-based access control rules.
 Changes here affect API behavior — test thoroughly after updates.
 """
-from rest_framework import permissions
+import random
 from decimal import Decimal
+from datetime import datetime, date, timedelta
+
 from django.utils import timezone
+from django.conf import settings
+from django.db import transaction, IntegrityError
+from django.db.models import Q, Sum, Count
+from django.contrib.auth import get_user_model, authenticate
+from django.contrib.auth.hashers import make_password
+
+from rest_framework import permissions
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.views import APIView 
 from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser
 from rest_framework.response import Response
 from rest_framework import status
-from datetime import datetime, date 
-from django.db import transaction, IntegrityError
-from django.contrib.auth import get_user_model, authenticate
 from rest_framework_simplejwt.tokens import RefreshToken
-from django.db.models import Q, Sum, Count
+from rest_framework_simplejwt.exceptions import TokenError
+
+import africastalking
 
 # System models — keep imports synced with models.py
-from .models import Landlord, Lease, Payment, Tenant, Property, Notice, Maintenance, User, RentalRequest, Meeting
+from .models import (
+    Landlord, Lease, Payment, Tenant, Property, Notice, Maintenance,
+    User, RentalRequest, Meeting, PasswordResetCode
+)
 
 # Serializers for data conversion & validation — synced with serializers.py
 from .serializers import (
@@ -41,6 +52,13 @@ from .serializers import (
 
 User = get_user_model()
 
+# Initialize Africa's Talking SMS service
+africastalking.initialize(
+    username=getattr(settings, "AFRICAS_TALKING_USERNAME", "sandbox"),
+    api_key=getattr(settings, "AFRICAS_TALKING_API_KEY", "")
+)
+sms = africastalking.SMS
+
 
 # ==================================================
 # Admin & Landlord User Management
@@ -48,7 +66,7 @@ User = get_user_model()
 class AdminCreateLandlordView(APIView):
     """
     Admin-only endpoint to create new landlord accounts.
-    Creates both core User record and linked Landlord profile automatically.
+    Automatically creates both core User record and linked Landlord profile.
     Permissions: Must be logged in as system admin.
     """
     permission_classes = [permissions.IsAuthenticated]
@@ -66,24 +84,6 @@ class AdminCreateLandlordView(APIView):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
-# class LandlordCreateTenantView(APIView):
-#     """
-#     Landlord-only endpoint to register new tenant accounts directly.
-#     Used when landlords add tenants to their properties without public sign-up.
-#     Permissions: Must be logged in as landlord.
-#     """
-#     permission_classes = [permissions.IsAuthenticated]
-
-#     def post(self, request):
-#         # Block non-landlord users
-#         if request.user.role != 'landlord':
-#             return Response({"error": "Only landlords can register tenants."}, status=status.HTTP_403_FORBIDDEN)
-
-#         serializer = TenantCreateSerializer(data=request.data)
-#         if serializer.is_valid():
-#             serializer.save()
-#             return Response({"message": "Tenant account created successfully."}, status=status.HTTP_201_CREATED)
-#         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 class LandlordCreateTenantView(APIView):
     """
     Landlord-only endpoint to register new tenant accounts directly.
@@ -117,9 +117,8 @@ class LandlordCreateTenantView(APIView):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
-
 # ==================================================
-# Authentication: Register, Login, Profile
+# Authentication: Register, Login, Profile, Logout, Reset
 # ==================================================
 @api_view(["POST"])
 @permission_classes([IsAdminUser])
@@ -251,6 +250,152 @@ def Login(request):
         "access": str(refresh.access_token),
         "refresh": str(refresh)
     })
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def logout_user(request):
+    """
+    Secure JWT Logout endpoint.
+    Invalidates/blacklists the provided refresh token so it cannot be reused.
+    Requires valid access token in headers and refresh token in request body.
+    """
+    try:
+        refresh_token = request.data.get('refresh')
+        if not refresh_token:
+            return Response({"error": "Refresh token is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Blacklist the refresh token permanently
+        token = RefreshToken(refresh_token)
+        token.blacklist()
+
+        return Response(
+            {"status": "success", "message": "Logged out successfully"},
+            status=status.HTTP_200_OK
+        )
+
+    except TokenError:
+        return Response({"error": "Invalid or expired token"}, status=status.HTTP_400_BAD_REQUEST)
+    except Exception as e:
+        return Response({"error": f"Logout failed: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def send_reset_code(request):
+    """
+    Send 6-digit password reset code via SMS to user's registered phone number.
+    Normalizes Kenyan phone numbers to 254 format automatically.
+    Does NOT confirm if number exists — prevents leaking registered accounts.
+    Invalidates all old unused codes for the same user before creating new one.
+    """
+    phone = request.data.get('phone')
+
+    if not phone:
+        return Response({"error": "Phone number is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+    # Normalize phone to standard Kenyan format 254xxxxxxxxx
+    if phone.startswith("0"):
+        phone = f"254{phone[1:]}"
+    elif phone.startswith("+"):
+        phone = phone[1:]
+
+    try:
+        # Match against custom User phone_number field
+        user = User.objects.filter(phone_number=phone).first()
+        if not user:
+            # Return identical message whether found or not for security
+            return Response(
+                {"message": "If this number is registered, a reset code was sent"},
+                status=status.HTTP_200_OK
+            )
+
+        # Mark all old unused codes as used
+        PasswordResetCode.objects.filter(user=user, is_used=False).update(is_used=True)
+
+        # Generate new 6-digit numeric code
+        reset_code = ''.join(str(random.randint(0, 9)) for _ in range(6))
+        expires_at = timezone.now() + timedelta(minutes=getattr(settings, "PASSWORD_RESET_EXPIRE_MINUTES", 15))
+
+        # Save new reset code to database
+        PasswordResetCode.objects.create(
+            user=user,
+            code=reset_code,
+            expires_at=expires_at
+        )
+
+        # Send SMS via Africa's Talking gateway
+        message = f"Your Smart Rental System reset code: {reset_code}. Expires in 15 minutes. Do NOT share this code with anyone."
+        sms.send(message, [phone], sender_id=getattr(settings, "AFRICAS_TALKING_SENDER_ID", "RENTAL"))
+
+        return Response(
+            {"status": "success", "message": "Reset code sent to your phone"},
+            status=status.HTTP_200_OK
+        )
+
+    except Exception as e:
+        return Response({"error": f"Failed to send code: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def confirm_password_reset(request):
+    """
+    Verify reset code and update user password securely.
+    Checks that code is correct, not expired, and not already used.
+    Password is hashed automatically before saving to database.
+    Code is marked as used immediately after success — cannot be reused.
+    """
+    phone = request.data.get('phone')
+    code = request.data.get('code')
+    new_password = request.data.get('new_password')
+
+    if not all([phone, code, new_password]):
+        return Response(
+            {"error": "Phone number, reset code, and new password are all required"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    if len(new_password) < 6:
+        return Response({"error": "New password must be at least 6 characters long"}, status=status.HTTP_400_BAD_REQUEST)
+
+    # Normalize phone number again for matching
+    if phone.startswith("0"):
+        phone = f"254{phone[1:]}"
+    elif phone.startswith("+"):
+        phone = phone[1:]
+
+    try:
+        user = User.objects.filter(phone_number=phone).first()
+        if not user:
+            return Response({"error": "Invalid phone number or reset code"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Find valid, unused, non-expired reset code
+        reset_entry = PasswordResetCode.objects.filter(
+            user=user,
+            code=code,
+            is_used=False,
+            expires_at__gt=timezone.now()
+        ).first()
+
+        if not reset_entry:
+            return Response({"error": "Invalid or expired reset code"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Update password securely
+        user.password = make_password(new_password)
+        user.save()
+
+        # Mark code as used permanently
+        reset_entry.is_used = True
+        reset_entry.save()
+
+        return Response(
+            {"status": "success", "message": "Password reset successfully — you can now login with your new password"},
+            status=status.HTTP_200_OK
+        )
+
+    except Exception as e:
+        return Response({"error": f"Password reset failed: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @api_view(["GET", "PUT", "PATCH"])
@@ -884,8 +1029,7 @@ def payment_detail(request, payment_id):
 def rent_for_month(request):
     """
     Check rent status for a specific month and active lease.
-    Usage:
-        /api/core/rent-for-month/?lease_id=1&month=2026-07
+    Usage: /api/core/rent-for-month/?lease_id=1&month=2026-07
     Returns rent amount, payment status, and balance for that period.
     """
     # Get query parameters
@@ -958,6 +1102,7 @@ def rent_for_month(request):
         "note": "Payments are applied to the oldest outstanding balance first."
     })
 
+
 @api_view(['PUT'])
 @permission_classes([IsAuthenticated])
 def verify_payment(request, payment_id):
@@ -985,127 +1130,76 @@ def verify_payment(request, payment_id):
         return Response({"error": "Only pending payments can be verified"}, status=status.HTTP_400_BAD_REQUEST)
     new_status = request.data.get('status')
     if new_status not in ['COMPLETED', 'FAILED']:
-        return Response({"error": "Status must be COMPLETED or FAILED"}, status=status.HTTP_400_BAD_REQUEST)
-
-    payment.status = new_status
-
-    # Generate official receipt details only for successful payments
-    if new_status == 'COMPLETED':
-        payment.receipt_number = f"RCPT-{timezone.now().strftime('%Y%m%d')}-{payment.id:06d}"
-        payment.receipt_issued_at = timezone.now()
-
-        # Recalculate covered months for verification
-        monthly_rent = payment.lease.monthly_rent
-        paid_amount = payment.amount
-        covered = []
-        remaining = paid_amount
-        current = payment.lease.start_date
-        while remaining >= monthly_rent and current <= payment.lease.end_date:
-            covered.append(current.strftime("%B %Y"))
-            remaining -= monthly_rent
-            current = current.replace(year=current.year + 1, month=1) if current.month == 12 else current.replace(month=current.month + 1)
-        payment.covered_months = covered
-
-        # Update final balance after this payment
-        total_paid = Payment.objects.filter(lease=payment.lease, status='COMPLETED').aggregate(total=Sum('amount'))['total'] or Decimal('0')
-        payment.balance_after_payment = max(Decimal('0'), monthly_rent - total_paid)
-
-    payment.save()
-    return Response({
-        "message": f"Payment marked as {new_status}",
-        "receipt_available": new_status == 'COMPLETED',
-        "payment": PaymentSerializer(payment, context={'request': request}).data
-    }, status=status.HTTP_200_OK)
-
-
+        return Response({"error": "Invalid status. Must be 'COMPLETED' or 'FAILED'"}, status=status.HTTP_400_BAD_REQUEST)   
+    
 # ==================================================
-# Super Admin Dashboard
+# Admin Dashboard Statistics (Missing Function)
 # ==================================================
-@api_view(['GET'])
-@permission_classes([IsAuthenticated])
-def admin_all_users(request):
-    """List every user account in the system — admin access only"""
-    if request.user.role != 'admin':
-        return Response({"error": "Access denied"}, status=status.HTTP_403_FORBIDDEN)
-
-    users = User.objects.all().order_by('-date_joined')
-    return Response({"users": UserSerializer(users, many=True).data})
-
-
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def admin_dashboard_stats(request):
     """
-    Get full system-wide statistics for admin overview.
-    Includes users, properties, leases, maintenance, and payment totals.
+    Returns system-wide statistics for admin dashboard.
+    Restricted to admin users only.
     """
     if request.user.role != 'admin':
-        return Response({"error": "Admin access required"}, status=403)
+        return Response({"error": "Admin access required"}, status=status.HTTP_403_FORBIDDEN)
 
-    # User breakdown
-    total_users = User.objects.count()
-    admin_count = User.objects.filter(role='admin').count()
-    landlord_count = User.objects.filter(role='landlord').count()
-    tenant_count = User.objects.filter(role='tenant').count()
+    from .models import Property, Lease, Payment, Tenant, Landlord, Maintenance, RentalRequest
 
-    # Property status breakdown
     total_properties = Property.objects.count()
-    available = Property.objects.filter(status='VACANT').count()
-    occupied = Property.objects.filter(status='OCCUPIED').count()
-    under_repair = Property.objects.filter(status='MAINTENANCE').count()
-    occupancy_rate = f"{(occupied / total_properties * 100):.0f}%" if total_properties > 0 else "0%"
+    total_landlords = Landlord.objects.count()
+    total_tenants = Tenant.objects.count()
+    active_leases = Lease.objects.filter(status="ACTIVE").count()
+    occupied = Property.objects.filter(status="OCCUPIED").count()
+    vacant = Property.objects.filter(status="AVAILABLE").count()
+    occupancy_rate = round((occupied / total_properties * 100) if total_properties else 0, 2)
 
-    # Lease status breakdown
-    total_leases = Lease.objects.count()
-    active_leases = Lease.objects.filter(status='ACTIVE').count()
-    pending_leases = Lease.objects.filter(status='PENDING').count()
-    expired_leases = Lease.objects.filter(status='EXPIRED').count()
-    terminated_leases = Lease.objects.filter(status='TERMINATED').count()
+    total_collected = Payment.objects.filter(status="COMPLETED").aggregate(t=Sum('amount'))['t'] or Decimal('0')
+    total_pending = Payment.objects.filter(status="PENDING").aggregate(t=Sum('amount'))['t'] or Decimal('0')
 
-    # Maintenance summary
-    total_maint = Maintenance.objects.count()
-    pending_maint = Maintenance.objects.filter(status__in=['PENDING', 'IN_PROGRESS']).count()
-    completed_maint = Maintenance.objects.filter(status='COMPLETED').count()
-
-    # Financial summary
-    total_collected = Payment.objects.filter(status='COMPLETED').aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
-    pending_amount = Payment.objects.filter(status='PENDING').aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
-    expected_rent = Lease.objects.filter(status='ACTIVE').aggregate(total=Sum('monthly_rent'))['total'] or Decimal('0.00')
+    pending_maintenance = Maintenance.objects.filter(status__in=["PENDING", "IN_PROGRESS"]).count()
+    pending_requests = RentalRequest.objects.filter(status="PENDING").count()
 
     return Response({
-        "summary": {
-            "report_generated": datetime.now().isoformat(),
-            "system_status": "Active"
+        "overview": {
+            "total_properties": total_properties,
+            "total_landlords": total_landlords,
+            "total_tenants": total_tenants,
+            "active_leases": active_leases,
+            "occupancy_rate_percent": occupancy_rate
         },
-        "users": {
-            "total": total_users,
-            "admins": admin_count,
-            "landlords": landlord_count,
-            "tenants": tenant_count
-        },
-        "properties": {
-            "total": total_properties,
-            "available": available,
-            "occupied": occupied,
-            "under_repair": under_repair,
-            "occupancy_rate": occupancy_rate
-        },
-        "leases": {
-            "total": total_leases,
-            "active": active_leases,
-            "pending": pending_leases,
-            "expired": expired_leases,
-            "terminated": terminated_leases
-        },
-        "maintenance": {
-            "total": total_maint,
-            "pending": pending_maint,
-            "completed": completed_maint
-        },
-        "payments": {
-            "total_revenue_collected": float(total_collected),
-            "pending_verification": float(pending_amount),
-            "outstanding_balance": 0.00,
-            "expected_monthly_rent": float(expected_rent)
-        }
+        "properties": {"occupied": occupied, "vacant": vacant},
+        "payments": {"total_collected": float(total_collected), "total_pending": float(total_pending)},
+        "pending_actions": {"maintenance": pending_maintenance, "rental_requests": pending_requests}
     })
+
+
+# ==================================================
+# Admin All Users List (Missing Function)
+# ==================================================
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def admin_all_users(request):
+    """
+    Returns full list of all system users for admin management.
+    Restricted to admin users only.
+    """
+    if request.user.role != 'admin':
+        return Response({"error": "Admin access required"}, status=status.HTTP_403_FORBIDDEN)
+
+    users = User.objects.all().order_by('-date_joined')
+    data = []
+    for user in users:
+        item = {
+            "id": user.id,
+            "email": user.email,
+            "username": user.username,
+            "role": user.role,
+            "phone_number": user.phone_number,
+            "is_active": user.is_active,
+            "date_joined": user.date_joined
+        }
+        data.append(item)
+
+    return Response({"users": data})

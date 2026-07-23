@@ -172,6 +172,14 @@ SIMPLE_JWT = {
     'USER_ID_FIELD': 'id',
     'USER_ID_CLAIM': 'user_id',
 }
+# ====================== AFRICA'S TALKING SMS SETTINGS ======================
+AFRICAS_TALKING_USERNAME = "sandbox"  # Use your live username in production
+AFRICAS_TALKING_API_KEY = "b2a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4"  # Replace with your key
+AFRICAS_TALKING_SENDER_ID = "RENTAL"  # Or use default: "AFRICASTKNG"
+
+# ====================== PASSWORD RESET SETTINGS ======================
+PASSWORD_RESET_CODE_LENGTH = 6
+PASSWORD_RESET_CODE_EXPIRE_MINUTES = 15
 
 # Optional: Allow all origins during development
 CORS_ALLOW_ALL_ORIGINS = True

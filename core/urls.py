@@ -20,6 +20,9 @@ urlpatterns = [
     path("register/", views.Register, name="register"),
     path("login/", views.Login, name="login"),
     path("profile/", views.ProfileView, name="profile"),
+    path("logout/", views.logout_user, name="logout"),
+    path("password/send-reset-code/", views.send_reset_code, name="send-reset-code"),
+    path("password/confirm-reset/", views.confirm_password_reset, name="confirm-reset"),
     path("token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
     path("token/verify/", TokenVerifyView.as_view(), name="token_verify"),
 
