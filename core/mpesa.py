@@ -1,3 +1,12 @@
+"""
+==========================================
+M-Pesa Integration — Safaricom STK Push
+==========================================
+Handles Lipa Na M-Pesa Online (STK Push) for tenant rent payments.
+Sends a payment request to the tenant's phone where they enter their PIN.
+Uses sandbox credentials from settings.py — switch to live for production.
+==========================================
+"""
 import base64
 import requests
 from datetime import datetime
@@ -11,6 +20,7 @@ class MpesaService:
     """
 
     def __init__(self):
+        """Initialize with credentials from Django settings."""
         self.consumer_key = settings.MPESA_CONSUMER_KEY
         self.consumer_secret = settings.MPESA_CONSUMER_SECRET
         self.shortcode = settings.MPESA_SHORTCODE
@@ -20,6 +30,7 @@ class MpesaService:
         self.stk_url = "https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest"
 
     def get_token(self):
+        """Get OAuth access token from Safaricom API using consumer key/secret."""
         response = requests.get(
             self.token_url,
             auth=requests.auth.HTTPBasicAuth(self.consumer_key, self.consumer_secret)
@@ -27,6 +38,7 @@ class MpesaService:
         return response.json()["access_token"]
 
     def get_password(self, timestamp):
+        """Generate base64-encoded password for STK Push request (shortcode + passkey + timestamp)."""
         raw = f"{self.shortcode}{self.passkey}{timestamp}"
         return base64.b64encode(raw.encode()).decode()
 

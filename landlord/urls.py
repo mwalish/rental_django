@@ -27,38 +27,7 @@ urlpatterns = [
     # Payments
     path("payments/", views.payments, name="landlord-payments"),
     path("payments/<int:pk>/", views.payment_detail, name="landlord-payment-detail"),
+
+    # Tenants — list tenants linked to the landlord's properties
+    path("tenants/", views.tenants, name="landlord-tenants"),
 ]
-# from django.urls import path
-# from . import views
-# urlpatterns = [
-#     path("profile/", views.profile, name="landlord-profile"),
-#     path("properties/", views.property_list, name="landlord-properties"),
-#     path("properties/<int:pk>/", views.property_detail, name="landlord-property-detail"),
-#     path("rental-requests/", views.rental_requests, name="landlord-rental-requests"),
-#     path("rental-requests/<int:pk>/", views.rental_requests, name="landlord-rental-request-update"),
-#     path("meetings/", views.meetings, name="landlord-meetings"),
-#     path("meetings/<int:pk>/", views.meeting_detail, name="landlord-meeting-detail"),
-#     path("leases/", views.lease_list_create, name="landlord-leases"),
-#     path("leases/<int:lease_id>/", views.lease_detail, name="landlord-lease-detail"),
-#     path("payments/", views.payments, name="landlord-payments"),
-#     path("payments/<int:pk>/", views.payment_detail, name="landlord-payment-detail"),
-#     path("dashboard/", views.dashboard, name="landlord-dashboard"),
-# ]
-
-# from django.urls import path
-# from . import views
-
-# urlpatterns = [
-#     path("profile/", views.profile, name="landlord-profile"),
-#     path("properties/", views.property_list, name="landlord-properties"),
-#     path("properties/<int:pk>/", views.property_detail, name="landlord-property-detail"),
-#     path("rental-requests/", views.rental_requests, name="landlord-rental-requests"),
-#     path("rental-requests/<int:pk>/", views.rental_requests, name="landlord-rental-request-update"),
-#     path("meetings/", views.meetings, name="landlord-meetings"),
-#     # path("leases/", views.leases, name="landlord-leases"),
-#     path("leases/", views.lease_list_create, name="lease-list-create"),
-#     path("leases/<int:lease_id>/", views.lease_detail, name="lease-detail"),
-#     path("payments/", views.payments, name="landlord-payments"),
-#     path("dashboard/", views.dashboard, name="landlord-dashboard"),
-    
-# ]

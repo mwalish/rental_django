@@ -27,9 +27,8 @@ DEBUG = True
 
 ALLOWED_HOSTS = ['treadmill-overhung-preorder.ngrok-free.dev', 'localhost', '127.0.0.1']
 
-AUTH_USER_MODEL = 'landlord.User'
-
-# Application definition
+# Custom user model — centralized in core app (NOT landlord)
+AUTH_USER_MODEL = 'core.User'
 INSTALLED_APPS = [
     'django.contrib.admin',
     'django.contrib.auth',
@@ -47,9 +46,6 @@ INSTALLED_APPS = [
 
     # Local apps
     'core',
-    'tenants',
-    'propeties',
-    'expenditure',
     'landlord'
 ]
 
@@ -157,7 +153,6 @@ REST_FRAMEWORK = {
     ),
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
 }
-AUTH_USER_MODEL = 'core.User'
 from datetime import timedelta
 
 SIMPLE_JWT = {

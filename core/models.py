@@ -1,3 +1,16 @@
+"""
+==========================================
+Core Models — Smart Rental Management System
+==========================================
+This module defines ALL database models for the rental system:
+- User (custom auth), Landlord, Tenant profiles
+- Property, Lease, Payment, Maintenance
+- RentalRequest, Meeting, Notice, PasswordResetCode
+
+All business logic models are centralized here to avoid duplication.
+The landlord app and other modules import from here.
+==========================================
+"""
 from django.db import models
 from django.contrib.auth.models import AbstractUser
 from django.utils import timezone
@@ -5,7 +18,7 @@ from decimal import Decimal
 from datetime import datetime
 
 # ------------------------------
-# Custom User Model
+# Custom User Model (extends Django's AbstractUser)
 # ------------------------------
 class User(AbstractUser):
     ROLE_CHOICES = (
@@ -42,7 +55,7 @@ class User(AbstractUser):
 
 
 # ------------------------------
-# Password Reset Code Model
+# Password Reset Code Model — stores 6-digit codes for password recovery
 # ------------------------------
 class PasswordResetCode(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE)
@@ -59,7 +72,7 @@ class PasswordResetCode(models.Model):
 
 
 # ------------------------------
-# Landlord Profile Model
+# Landlord Profile Model — linked 1-to-1 with User; stores business & ID details
 # ------------------------------
 class Landlord(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='landlord_profile')
@@ -79,7 +92,7 @@ class Landlord(models.Model):
 
 
 # ------------------------------
-# Tenant Profile Model
+# Tenant Profile Model — linked 1-to-1 with User; stores personal & contact info
 # ------------------------------
 class Tenant(models.Model):
     full_name = models.CharField(max_length=100)
@@ -98,7 +111,7 @@ class Tenant(models.Model):
         return self.full_name
 
 # ------------------------------
-# Property Model
+# Property Model — rental units owned by landlords; tracks status, rent, amenities
 # ------------------------------
 class Property(models.Model):
     STATUS_CHOICES = (
@@ -121,7 +134,7 @@ class Property(models.Model):
 
 
 # ------------------------------
-# Rental Request Model
+# Rental Request Model — tenants apply to rent a property; landlords approve/reject
 # ------------------------------
 class RentalRequest(models.Model):
     STATUS_CHOICES = (
@@ -171,7 +184,7 @@ class RentalRequest(models.Model):
 
 
 # ------------------------------
-# Meeting / Viewing Model
+# Meeting / Viewing Model — schedules property viewings between landlords and tenants
 # ------------------------------
 class Meeting(models.Model):
     STATUS_CHOICES = (
@@ -194,7 +207,7 @@ class Meeting(models.Model):
 
 
 # ------------------------------
-# Lease Agreement Model
+# Lease Agreement Model — binds tenant to property for a period with monthly rent
 # ------------------------------
 class Lease(models.Model):
     property = models.ForeignKey(Property, on_delete=models.CASCADE, related_name='leases')
@@ -217,37 +230,8 @@ class Lease(models.Model):
 
 
 # ------------------------------
-# Payment Model
+# Payment Model — rent transactions; tracks M-Pesa, bank, cash, cheque, receipts, balances
 # ------------------------------
-# class Payment(models.Model):
-#     lease = models.ForeignKey(Lease, on_delete=models.CASCADE, related_name='payments')
-#     amount = models.DecimalField(max_digits=10, decimal_places=2)
-#     payment_date = models.DateTimeField(auto_now_add=True)
-#     method = models.CharField(max_length=30, default='M-Pesa')
-#     STATUS_CHOICES = (
-#         ('PENDING', 'Pending'),
-#         ('COMPLETED', 'Completed'),
-#         ('FAILED', 'Failed'),
-#     )
-#     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='PENDING')
-#     transaction_id = models.CharField(max_length=100, blank=True, null=True)
-#     created_at = models.DateTimeField(auto_now_add=True)
-#     updated_at = models.DateTimeField(auto_now=True)
-#     receipt_number = models.CharField(max_length=50, unique=True, null=True, blank=True, db_index=True)
-#     receipt_issued_at = models.DateTimeField(null=True, blank=True)
-#     covered_months = models.JSONField(default=list, blank=True)
-#     balance_after_payment = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
-#     mpesa_checkout_request_id = models.CharField(max_length=100, blank=True, null=True, unique=True)
-
-#     def clean(self):
-#         from django.core.exceptions import ValidationError
-#         if self.status == 'COMPLETED' and not self.receipt_number:
-#             raise ValidationError('Completed payments must have a receipt number.')
-#         if self.status == 'COMPLETED' and not self.receipt_issued_at:
-#             raise ValidationError('Completed payments must have a receipt issued date.')
-
-#     def __str__(self):
-#         return f"{self.lease.tenant.full_name} - KSh {self.amount}"
 class Payment(models.Model):
     lease = models.ForeignKey(Lease, on_delete=models.CASCADE, related_name='payments')
     amount = models.DecimalField(max_digits=10, decimal_places=2)
@@ -288,7 +272,7 @@ class Payment(models.Model):
         return f"{self.lease.tenant.full_name} - KSh {self.amount}"
 
 # ------------------------------
-# Maintenance Request Model
+# Maintenance Request Model — tenants report issues; landlords track resolution
 # ------------------------------
 class Maintenance(models.Model):
     property = models.ForeignKey(Property, on_delete=models.CASCADE, related_name='maintenance_requests')
@@ -309,7 +293,7 @@ class Maintenance(models.Model):
 
 
 # ------------------------------
-# System Notice Model
+# System Notice Model — announcements targeted at all users, tenants, or landlords
 # ------------------------------
 class Notice(models.Model):
     title = models.CharField(max_length=200)

@@ -1,8 +1,8 @@
 from django.contrib import admin
 from django.contrib.auth import get_user_model
 
-# ✅ Import ALL models from the CORRECT place: landlord app
-from .models import (
+# All models are defined in core/models.py (single source of truth)
+from core.models import (
     Landlord,
     Tenant,
     Property,

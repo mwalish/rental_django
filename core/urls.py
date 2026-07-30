@@ -1,6 +1,15 @@
-# ==================================================
-# URL Configuration — Property Management API
-# ==================================================
+"""
+==========================================
+Core URL Configuration — All API Endpoints
+==========================================
+Routes for:
+- Authentication (register, login, logout, password reset)
+- Rental requests, meetings, leases, notices, maintenance
+- Payments (M-Pesa STK push, manual, receipts)
+- Admin dashboard and user management
+- House-hunting portal (public property listing + tenant self-registration)
+==========================================
+"""
 from django.urls import path
 from . import views
 from rest_framework_simplejwt.views import TokenRefreshView, TokenVerifyView
@@ -70,6 +79,12 @@ urlpatterns = [
     path('payments/mpesa/stk-push/', views.mpesa_stk_push, name='mpesa-stk-push'),
     path('payments/mpesa/callback/', views.mpesa_callback, name='mpesa-callback'),
     path('payments/<int:payment_id>/receipt/', views.payment_receipt, name='payment-receipt'),
+
+    # ==============================================
+    # House-Hunting Portal (Public)
+    # ==============================================
+    path('house-hunting/properties/', views.available_properties, name='house-hunting-properties'),
+    path('house-hunting/register/', views.tenant_self_register, name='tenant-self-register'),
 
     # ==============================================
     # Super Admin System Overview
