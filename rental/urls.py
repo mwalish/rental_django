@@ -31,8 +31,10 @@ urlpatterns = [
     # Core App Endpoints (auth, leases, payments, etc.)
     path("api/core/", include("core.urls")),
 
+
     # Landlord App Endpoints
     path("api/landlord/", include("landlord.urls")),
+    
 ]
 
 # Serve media files in development

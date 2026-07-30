@@ -40,6 +40,7 @@ from .serializers import (
     MaintenanceSerializer,
     NoticeSerializer,
     PaymentSerializer,
+    PropertySerializer,
     UserRegistrationSerializer,
     UserSerializer,
     LandlordProfileSerializer,
@@ -444,6 +445,18 @@ def ProfileView(request):
         return Response({"message": "Profile updated successfully", "profile": serializer.data})
     
     return Response({"error": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+
+
+# ==================================================
+# Available Properties (for tenants browsing)
+# ==================================================
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def available_properties(request):
+    """Returns all AVAILABLE properties for tenants to browse and apply."""
+    properties = Property.objects.filter(status='AVAILABLE').order_by('-created_at')
+    serializer = PropertySerializer(properties, many=True)
+    return Response(serializer.data)
 
 
 # ==================================================
@@ -1132,6 +1145,180 @@ def verify_payment(request, payment_id):
     if new_status not in ['COMPLETED', 'FAILED']:
         return Response({"error": "Invalid status. Must be 'COMPLETED' or 'FAILED'"}, status=status.HTTP_400_BAD_REQUEST)   
     
+# ==================================================
+# M-Pesa STK Push Integration
+# ==================================================
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def mpesa_stk_push(request):
+    """
+    Initiate M-Pesa STK Push for a tenant's rent payment.
+    Tenant receives a PIN prompt on their phone.
+    POST body: { "lease_id": 1, "amount": 5000, "phone": "0712345678" }
+    """
+    from .mpesa import MpesaService
+
+    user = request.user
+    if user.role != 'tenant' or not hasattr(user, 'tenant'):
+        return Response({"error": "Only tenants can initiate M-Pesa payments."}, status=status.HTTP_403_FORBIDDEN)
+
+    lease_id = request.data.get('lease_id')
+    amount = request.data.get('amount')
+    phone = request.data.get('phone') or user.phone_number
+
+    if not lease_id or not amount:
+        return Response({"error": "lease_id and amount are required."}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        lease = Lease.objects.get(id=lease_id, tenant=user.tenant, status='ACTIVE')
+    except Lease.DoesNotExist:
+        return Response({"error": "Active lease not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    if lease.end_date < datetime.today().date():
+        return Response({"error": "Cannot pay — this lease has expired."}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        mpesa = MpesaService()
+        result = mpesa.stk_push(
+            phone=phone,
+            amount=amount,
+            account_ref=f"LEASE-{lease.id}",
+            description=f"Rent for {lease.property.title}"
+        )
+    except Exception as e:
+        return Response({"error": f"M-Pesa request failed: {str(e)}"}, status=status.HTTP_502_BAD_GATEWAY)
+
+    if result.get('ResponseCode') != '0':
+        return Response({"error": result.get('errorMessage', 'STK push failed'), "mpesa_response": result}, status=status.HTTP_400_BAD_REQUEST)
+
+    # Create a PENDING payment record linked to this STK push
+    payment = Payment.objects.create(
+        lease=lease,
+        amount=amount,
+        method='M-Pesa',
+        status='PENDING',
+        mpesa_checkout_request_id=result.get('CheckoutRequestID')
+    )
+
+    return Response({
+        "message": "STK Push sent. Please enter your M-Pesa PIN on your phone.",
+        "payment_id": payment.id,
+        "checkout_request_id": result.get('CheckoutRequestID'),
+        "mpesa_response": result
+    }, status=status.HTTP_201_CREATED)
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def mpesa_callback(request):
+    """
+    Safaricom callback endpoint — receives STK Push result.
+    Updates payment status to COMPLETED or FAILED.
+    """
+    data = request.data
+    stk_callback = data.get('Body', {}).get('stkCallback', {})
+    checkout_request_id = stk_callback.get('CheckoutRequestID')
+    result_code = stk_callback.get('ResultCode')
+
+    if not checkout_request_id:
+        return Response({"received": True})
+
+    try:
+        payment = Payment.objects.get(mpesa_checkout_request_id=checkout_request_id)
+    except Payment.DoesNotExist:
+        return Response({"received": True})
+
+    if result_code == 0:
+        items = stk_callback.get('CallbackMetadata', {}).get('Item', [])
+        mpesa_receipt = next((i['Value'] for i in items if i.get('Name') == 'MpesaReceiptNumber'), None)
+        payment.status = 'COMPLETED'
+        payment.transaction_id = mpesa_receipt
+        payment.receipt_issued_at = timezone.now()
+        payment.receipt_number = f"RCP-{payment.id}-{int(timezone.now().timestamp())}"
+
+        # Auto-calculate covered months on completion
+        lease = payment.lease
+        monthly_rent = Decimal(lease.monthly_rent)
+        paid_amount = Decimal(payment.amount)
+        covered_months = []
+        remaining = paid_amount
+        current = lease.start_date
+        while remaining >= monthly_rent and current <= lease.end_date:
+            covered_months.append(current.strftime("%B %Y"))
+            remaining -= monthly_rent
+            current = current.replace(year=current.year + 1, month=1) if current.month == 12 else current.replace(month=current.month + 1)
+        payment.covered_months = covered_months
+        payment.balance_after_payment = remaining
+        payment.full_clean()
+        payment.save(update_fields=['status', 'transaction_id', 'receipt_issued_at', 'receipt_number', 'covered_months', 'balance_after_payment'])
+
+        # Send SMS receipt to tenant
+        try:
+            tenant = lease.tenant
+            phone = tenant.phone
+            if phone.startswith('0'):
+                phone = '254' + phone[1:]
+            months_text = ', '.join(covered_months) if covered_months else 'N/A'
+            msg = (
+                f"✅ Rent Payment Confirmed!\n"
+                f"Receipt: {payment.receipt_number}\n"
+                f"Amount: KSh {payment.amount}\n"
+                f"M-Pesa Ref: {mpesa_receipt}\n"
+                f"Covers: {months_text}\n"
+                f"Property: {lease.property.title}\n"
+                f"Date: {payment.receipt_issued_at.strftime('%d %b %Y %H:%M')}"
+            )
+            sms.send(msg, [phone], sender_id=getattr(settings, 'AFRICAS_TALKING_SENDER_ID', 'RENTAL'))
+        except Exception:
+            pass
+    else:
+        payment.status = 'FAILED'
+        payment.save(update_fields=['status'])
+
+    return Response({"received": True})
+
+
+# ==================================================
+# Payment Receipt
+# ==================================================
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def payment_receipt(request, payment_id):
+    """
+    Fetch receipt for a completed payment.
+    Accessible by the tenant who made the payment, their landlord, or admin.
+    """
+    try:
+        payment = Payment.objects.select_related('lease', 'lease__property', 'lease__tenant').get(id=payment_id)
+    except Payment.DoesNotExist:
+        return Response({"error": "Payment not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    user = request.user
+    if user.role == 'tenant' and hasattr(user, 'tenant') and payment.lease.tenant != user.tenant:
+        return Response({"error": "Access denied."}, status=status.HTTP_403_FORBIDDEN)
+    if user.role == 'landlord' and hasattr(user, 'landlord_profile') and payment.lease.property.landlord != user.landlord_profile:
+        return Response({"error": "Access denied."}, status=status.HTTP_403_FORBIDDEN)
+
+    if payment.status != 'COMPLETED':
+        return Response({"error": "Receipt is only available for completed payments."}, status=status.HTTP_400_BAD_REQUEST)
+
+    lease = payment.lease
+    return Response({
+        "receipt": {
+            "receipt_number": payment.receipt_number,
+            "issued_at": payment.receipt_issued_at,
+            "tenant": lease.tenant.full_name,
+            "property": lease.property.title,
+            "amount_paid": f"{payment.amount:.2f}",
+            "mpesa_ref": payment.transaction_id,
+            "method": payment.method,
+            "covers_months": payment.covered_months,
+            "balance_after": f"{payment.balance_after_payment:.2f}" if payment.balance_after_payment is not None else "0.00",
+            "payment_id": payment.id,
+        }
+    })
+
+
 # ==================================================
 # Admin Dashboard Statistics (Missing Function)
 # ==================================================

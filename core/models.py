@@ -219,11 +219,49 @@ class Lease(models.Model):
 # ------------------------------
 # Payment Model
 # ------------------------------
+# class Payment(models.Model):
+#     lease = models.ForeignKey(Lease, on_delete=models.CASCADE, related_name='payments')
+#     amount = models.DecimalField(max_digits=10, decimal_places=2)
+#     payment_date = models.DateTimeField(auto_now_add=True)
+#     method = models.CharField(max_length=30, default='M-Pesa')
+#     STATUS_CHOICES = (
+#         ('PENDING', 'Pending'),
+#         ('COMPLETED', 'Completed'),
+#         ('FAILED', 'Failed'),
+#     )
+#     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='PENDING')
+#     transaction_id = models.CharField(max_length=100, blank=True, null=True)
+#     created_at = models.DateTimeField(auto_now_add=True)
+#     updated_at = models.DateTimeField(auto_now=True)
+#     receipt_number = models.CharField(max_length=50, unique=True, null=True, blank=True, db_index=True)
+#     receipt_issued_at = models.DateTimeField(null=True, blank=True)
+#     covered_months = models.JSONField(default=list, blank=True)
+#     balance_after_payment = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+#     mpesa_checkout_request_id = models.CharField(max_length=100, blank=True, null=True, unique=True)
+
+#     def clean(self):
+#         from django.core.exceptions import ValidationError
+#         if self.status == 'COMPLETED' and not self.receipt_number:
+#             raise ValidationError('Completed payments must have a receipt number.')
+#         if self.status == 'COMPLETED' and not self.receipt_issued_at:
+#             raise ValidationError('Completed payments must have a receipt issued date.')
+
+#     def __str__(self):
+#         return f"{self.lease.tenant.full_name} - KSh {self.amount}"
 class Payment(models.Model):
     lease = models.ForeignKey(Lease, on_delete=models.CASCADE, related_name='payments')
     amount = models.DecimalField(max_digits=10, decimal_places=2)
     payment_date = models.DateTimeField(auto_now_add=True)
-    method = models.CharField(max_length=30, default='M-Pesa')
+
+    # ✅ BACK TO "method" — matches your Admin perfectly
+    PAYMENT_METHODS = (
+        ('M-Pesa', 'M-Pesa'),
+        ('Bank Transfer', 'Bank Transfer'),
+        ('Cash', 'Cash'),
+        ('Cheque', 'Cheque'),
+    )
+    method = models.CharField(max_length=30, choices=PAYMENT_METHODS, default='M-Pesa')
+
     STATUS_CHOICES = (
         ('PENDING', 'Pending'),
         ('COMPLETED', 'Completed'),
@@ -233,14 +271,21 @@ class Payment(models.Model):
     transaction_id = models.CharField(max_length=100, blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    receipt_number = models.CharField(max_length=20, unique=True, null=True, blank=True)
+    receipt_number = models.CharField(max_length=50, unique=True, null=True, blank=True, db_index=True)
     receipt_issued_at = models.DateTimeField(null=True, blank=True)
     covered_months = models.JSONField(default=list, blank=True)
     balance_after_payment = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    mpesa_checkout_request_id = models.CharField(max_length=100, blank=True, null=True, unique=True)
+
+    def clean(self):
+        from django.core.exceptions import ValidationError
+        if self.status == 'COMPLETED' and not self.receipt_number:
+            raise ValidationError('Completed payments must have a receipt number.')
+        if self.status == 'COMPLETED' and not self.receipt_issued_at:
+            raise ValidationError('Completed payments must have a receipt issued date.')
 
     def __str__(self):
         return f"{self.lease.tenant.full_name} - KSh {self.amount}"
-
 
 # ------------------------------
 # Maintenance Request Model

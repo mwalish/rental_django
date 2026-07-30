@@ -25,7 +25,7 @@ SECRET_KEY = 'django-insecure-zp0^e50bve_x(q!ea+!qxtz7lcbgwyo4i2)$0rop!u&#%jfy49
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = ['treadmill-overhung-preorder.ngrok-free.dev', 'localhost', '127.0.0.1']
 
 AUTH_USER_MODEL = 'landlord.User'
 
@@ -176,6 +176,13 @@ SIMPLE_JWT = {
 AFRICAS_TALKING_USERNAME = "sandbox"  # Use your live username in production
 AFRICAS_TALKING_API_KEY = "b2a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4"  # Replace with your key
 AFRICAS_TALKING_SENDER_ID = "RENTAL"  # Or use default: "AFRICASTKNG"
+
+# ====================== MPESA SETTINGS ======================
+MPESA_CONSUMER_KEY = "GTWADFxIpUfDoNikNGqq1C3023evM6UH"
+MPESA_CONSUMER_SECRET = "amFbAoUByPV2rM5A"
+MPESA_SHORTCODE = "174379"          # Safaricom sandbox test shortcode
+MPESA_PASSKEY = "bfb279f9aa9bdbcf158e97dd71a467cd2e0c893059b10f78e6b72ada1ed2c919"  # Sandbox passkey
+MPESA_CALLBACK_URL = "https://treadmill-overhung-preorder.ngrok-free.dev/api/core/payments/mpesa/callback/"
 
 # ====================== PASSWORD RESET SETTINGS ======================
 PASSWORD_RESET_CODE_LENGTH = 6

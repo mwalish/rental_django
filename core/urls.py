@@ -34,6 +34,7 @@ urlpatterns = [
     # ==============================================
     path('rental-requests/', views.rental_request_list_create, name='rental-request-list-create'),
     path('rental-requests/<int:request_id>/', views.rental_request_detail, name='rental-request-detail'),
+    path('properties/available/', views.available_properties, name='available-properties'),
 
     # ==============================================
     # Meeting / Viewing Scheduling
@@ -66,6 +67,9 @@ urlpatterns = [
     path('payments/<int:payment_id>/', views.payment_detail, name='payment_detail'),
     path('rent-for-month/', views.rent_for_month, name='rent-for-month'),
     path('payments/<int:payment_id>/verify/', views.verify_payment, name='verify-payment'),
+    path('payments/mpesa/stk-push/', views.mpesa_stk_push, name='mpesa-stk-push'),
+    path('payments/mpesa/callback/', views.mpesa_callback, name='mpesa-callback'),
+    path('payments/<int:payment_id>/receipt/', views.payment_receipt, name='payment-receipt'),
 
     # ==============================================
     # Super Admin System Overview
