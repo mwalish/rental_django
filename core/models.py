@@ -17,9 +17,9 @@ from django.utils import timezone
 from decimal import Decimal
 from datetime import datetime
 
-# ------------------------------
+# ------------------------------------------------------
 # Custom User Model (extends Django's AbstractUser)
-# ------------------------------
+# ----------------------------------------------------
 class User(AbstractUser):
     ROLE_CHOICES = (
         ('admin', 'System Admin'),
@@ -54,9 +54,9 @@ class User(AbstractUser):
         return f"{self.username} ({self.role})"
 
 
-# ------------------------------
+# ----------------------------------------------------------------------
 # Password Reset Code Model — stores 6-digit codes for password recovery
-# ------------------------------
+# ----------------------------------------------------------------------
 class PasswordResetCode(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE)
     code = models.CharField(max_length=6)
@@ -104,6 +104,14 @@ class Tenant(models.Model):
     exit_date = models.DateField(blank=True, null=True)
     profile_picture = models.ImageField(upload_to="tenants/", blank=True, null=True)
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="tenant")
+    registered_by = models.ForeignKey(
+        'Landlord',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='registered_tenants',
+        help_text="Landlord who registered this tenant (null for self-registered)"
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -123,8 +131,12 @@ class Property(models.Model):
     landlord = models.ForeignKey(Landlord, on_delete=models.CASCADE, related_name='properties')
     location = models.CharField(max_length=255)
     rent_per_month = models.DecimalField(max_digits=10, decimal_places=2)
+    bedrooms = models.PositiveIntegerField(default=1, help_text="Number of bedrooms")
+    bathrooms = models.PositiveIntegerField(default=1, help_text="Number of bathrooms")
+    square_feet = models.PositiveIntegerField(null=True, blank=True, help_text="Property size in square feet")
     has_water = models.BooleanField(default=True)
     has_electricity = models.BooleanField(default=True)
+    photos = models.JSONField(default=list, blank=True, help_text="Array of base64 image strings for property photos")
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='AVAILABLE')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -151,9 +163,11 @@ class RentalRequest(models.Model):
     )
     tenant = models.ForeignKey(
         Tenant,
-        on_delete=models.CASCADE,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
         related_name='rental_applications',
-        help_text="Tenant submitting the request"
+        help_text="Tenant submitting the request (null for guest/lead inquiries)"
     )
     landlord = models.ForeignKey(
         Landlord,
@@ -162,6 +176,11 @@ class RentalRequest(models.Model):
         editable=False,
         help_text="Auto-set from property owner"
     )
+    # Guest/lead contact fields — used when a visitor without a tenant account
+    # submits a rental inquiry directly (no sign-up required).
+    lead_name = models.CharField(max_length=100, blank=True, null=True, help_text="Full name from guest inquiry")
+    lead_phone = models.CharField(max_length=20, blank=True, null=True, help_text="Phone number from guest inquiry")
+    lead_email = models.EmailField(blank=True, null=True, help_text="Email from guest inquiry")
     message = models.TextField(blank=True, null=True, help_text="Tenant's application note")
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='PENDING')
     landlord_notes = models.TextField(blank=True, null=True, help_text="Landlord feedback")

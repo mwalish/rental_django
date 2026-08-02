@@ -3,6 +3,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
 from django.db.models import Count, Sum, Q
+from django.db import transaction
 from datetime import datetime
 from django.conf import settings
 
@@ -181,6 +182,27 @@ def property_detail(request, pk):
 
 
 # -----------------------------------------------------
+# Property Applicants — who applied for each house
+# -----------------------------------------------------
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def property_applicants(request, property_id):
+    """Return all rental requests (applicants) for one of the landlord's properties."""
+    landlord = get_valid_landlord(request.user)
+    if not landlord:
+        return Response({"error": "Access denied"}, status=status.HTTP_403_FORBIDDEN)
+
+    try:
+        prop = Property.objects.get(id=property_id, landlord=landlord)
+    except Property.DoesNotExist:
+        return Response({"error": "Property not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    reqs = RentalRequest.objects.filter(property=prop).select_related('tenant', 'landlord').order_by('-created_at')
+    serializer = RentalRequestSerializer(reqs, many=True)
+    return Response({"applicants": serializer.data})
+
+
+# -----------------------------------------------------
 # Rental Requests
 # -----------------------------------------------------
 @api_view(["GET", "PATCH"])
@@ -202,8 +224,21 @@ def rental_requests(request, pk=None):
 
     serializer = RentalRequestSerializer(req, data=request.data, partial=True)
     if serializer.is_valid():
+        new_status = serializer.validated_data.get('status', req.status)
         serializer.save()
-        return Response({"message": "Request updated", "data": serializer.data})
+
+        # Auto-grant tenant privileges when a request is approved —
+        # reuses the existing account; never creates a duplicate.
+        converted_info = None
+        if new_status == 'APPROVED':
+            from core.views import convert_lead_to_tenant_account
+            if req.tenant or req.lead_name or req.lead_phone or req.lead_email:
+                converted_info = convert_lead_to_tenant_account(request.user, req, landlord=landlord)
+
+        data = RentalRequestSerializer(req).data
+        if converted_info:
+            data['converted_tenant'] = converted_info
+        return Response({"message": "Request updated", "data": data})
     return Response({"error": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -410,18 +445,83 @@ def lease_detail(request, lease_id):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def tenants(request):
-    """List all tenants who have or have had leases on the landlord's properties."""
+    """List ALL tenants the landlord can see:
+      - tenants explicitly registered by this landlord,
+      - tenants who hold a lease on the landlord's properties,
+      - tenants who have an APPROVED rental request on the landlord's properties.
+
+    The landlord can view full details on every one of these — including
+    tenants they personally registered and approved applicants.
+    """
     landlord = get_valid_landlord(request.user)
     if not landlord:
         return Response({"error": "Access denied"}, status=status.HTTP_403_FORBIDDEN)
 
-    tenant_ids = Lease.objects.filter(
+    # Tenants explicitly registered by this landlord + tenants on this landlord's leases
+    registered_ids = Tenant.objects.filter(registered_by=landlord).values_list('id', flat=True)
+    leased_ids = Lease.objects.filter(
         property__landlord=landlord
     ).values_list('tenant', flat=True).distinct()
 
-    tenants_qs = Tenant.objects.filter(id__in=tenant_ids)
+    # Tenants with APPROVED rental requests on the landlord's properties
+    approved_req_ids = RentalRequest.objects.filter(
+        property__landlord=landlord, status="APPROVED", tenant__isnull=False
+    ).values_list('tenant', flat=True).distinct()
+
+    combined_ids = set(registered_ids) | set(leased_ids) | set(approved_req_ids)
+    tenants_qs = Tenant.objects.filter(id__in=combined_ids).order_by('full_name')
     serializer = TenantProfileSerializer(tenants_qs, many=True)
     return Response(serializer.data)
+
+
+# -----------------------------------------------------
+# Registered Tenants — Only tenants this landlord created
+# -----------------------------------------------------
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def registered_tenants(request):
+    """Return ONLY the tenants this landlord has registered (via Register Tenant).
+
+    Used by the lease-creation form so the landlord can select from the
+    tenants they personally registered — not every tenant in the system.
+    """
+    landlord = get_valid_landlord(request.user)
+    if not landlord:
+        return Response({"error": "Access denied"}, status=status.HTTP_403_FORBIDDEN)
+
+    qs = Tenant.objects.filter(registered_by=landlord).order_by('full_name')
+    serializer = TenantProfileSerializer(qs, many=True)
+    return Response({"tenants": serializer.data})
+
+
+# -----------------------------------------------------
+# Convert a house-hunting lead into a registered tenant
+# -----------------------------------------------------
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+@transaction.atomic
+def convert_lead_to_tenant(request, request_id):
+    """Promote a rental request lead into a full tenant account.
+
+    Key principle: REUSE an existing account whenever possible — never create
+    a duplicate. If the lead already has an account (by email, normalized phone,
+    or full-name match), that exact account is granted the tenant role/privilege
+    and linked to the request. A brand-new account is created ONLY as a last
+    resort when nothing matches.
+    """
+    from core.views import convert_lead_to_tenant_account
+
+    landlord = get_valid_landlord(request.user)
+    if not landlord:
+        return Response({"error": "Access denied"}, status=status.HTTP_403_FORBIDDEN)
+
+    try:
+        req = RentalRequest.objects.get(pk=request_id, property__landlord=landlord)
+    except RentalRequest.DoesNotExist:
+        return Response({"error": "Request not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    result = convert_lead_to_tenant_account(request.user, req, landlord=landlord)
+    return Response(result)
     
     
     

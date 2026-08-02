@@ -100,7 +100,9 @@ class LandlordCreateTenantView(APIView):
     def post(self, request):
         if request.user.role != 'landlord':
             return Response({"error": "Only landlords can register tenant accounts."}, status=status.HTTP_403_FORBIDDEN)
-        serializer = TenantCreateSerializer(data=request.data)
+        if not hasattr(request.user, 'landlord_profile'):
+            return Response({"error": "Landlord profile not found."}, status=status.HTTP_403_FORBIDDEN)
+        serializer = TenantCreateSerializer(data=request.data, context={'request': request, 'landlord': request.user.landlord_profile})
         if serializer.is_valid():
             tenant = serializer.save()
             return Response({
@@ -173,13 +175,17 @@ def Register(request):
             p.save()
 
         elif requested_role == "tenant":
-            Tenant.objects.get_or_create(user=user, defaults={
+            tenant_defaults = {
                 "full_name": request.data.get("full_name", ""),
                 "id_number": request.data.get("id_number", ""),
                 "phone": request.data.get("phone", ""),
                 "email_address": data["email"],
                 "alternative_phone": request.data.get("alternative_phone", "")
-            })
+            }
+            # If a landlord is creating this tenant, track who registered them
+            if request.user.is_authenticated and getattr(request.user, 'role', None) == 'landlord' and hasattr(request.user, 'landlord_profile'):
+                tenant_defaults['registered_by'] = request.user.landlord_profile
+            Tenant.objects.get_or_create(user=user, defaults=tenant_defaults)
             p = user.tenant
             for field in ["full_name", "id_number", "alternative_phone"]:
                 val = request.data.get(field)
@@ -207,7 +213,7 @@ def Login(request):
     if not email or not password:
         return Response({"error": "Email and password are required."}, status=status.HTTP_400_BAD_REQUEST)
 
-    user = authenticate(username=email, password=password)
+    user = authenticate(email=email, password=password)
     if not user:
         return Response({"error": "Invalid credentials."}, status=status.HTTP_401_UNAUTHORIZED)
 
@@ -349,6 +355,75 @@ def available_properties(request):
 
 @api_view(['POST'])
 @permission_classes([AllowAny])
+def house_hunting_request(request):
+    """
+    Public rental inquiry / application — NO sign-up required.
+
+    - Guest (anonymous): creates a RentalRequest linked to the property's landlord,
+      storing applicant contact in lead_name / lead_phone / lead_email.
+    - Logged-in tenant: creates a proper application linked to their tenant account.
+    """
+    property_id = request.data.get('property')
+    if not property_id:
+        return Response({"error": "property is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        prop = Property.objects.get(id=property_id)
+    except (Property.DoesNotExist, ValueError):
+        return Response({"error": "Property not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    if prop.status != 'AVAILABLE':
+        return Response({"error": "This property is no longer available."}, status=status.HTTP_400_BAD_REQUEST)
+
+    user = request.user if request.user.is_authenticated else None
+
+    # Logged-in tenant → create an application linked to their account
+    if user and user.role == 'tenant' and hasattr(user, 'tenant'):
+        existing = RentalRequest.objects.filter(property=prop, tenant=user.tenant).first()
+        if existing:
+            return Response(
+                {"error": "You have already applied for this property."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        request_obj = RentalRequest.objects.create(
+            property=prop,
+            tenant=user.tenant,
+            landlord=prop.landlord,
+            message=request.data.get('message', '')
+        )
+        return Response({
+            "message": "Application submitted successfully! The landlord will review your request.",
+            "request": RentalRequestSerializer(request_obj).data
+        }, status=status.HTTP_201_CREATED)
+
+    # Guest / anonymous → store contact details as a lead
+    lead_name = (request.data.get('lead_name') or request.data.get('full_name') or '').strip()
+    lead_phone = (request.data.get('lead_phone') or request.data.get('phone') or '').strip()
+    lead_email = (request.data.get('lead_email') or request.data.get('email') or '').strip()
+
+    if not lead_name or not lead_phone:
+        return Response(
+            {"error": "full_name and phone are required for guest inquiries."},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    request_obj = RentalRequest.objects.create(
+        property=prop,
+        landlord=prop.landlord,
+        tenant=None,
+        lead_name=lead_name,
+        lead_phone=lead_phone,
+        lead_email=lead_email,
+        message=request.data.get('message', '')
+    )
+    return Response({
+        "message": "Request submitted successfully! The landlord or admin will contact you soon.",
+        "request": RentalRequestSerializer(request_obj).data
+    }, status=status.HTTP_201_CREATED)
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
 def tenant_self_register(request):
     """Public tenant self-registration. Role is forced to 'tenant' only."""
     serializer = UserRegistrationSerializer(data=request.data)
@@ -364,7 +439,8 @@ def tenant_self_register(request):
             password=data["password"],
             role="tenant"
         )
-        Tenant.objects.create(
+       
+        tenant = Tenant.objects.create(
             user=user,
             full_name=request.data.get("full_name", ""),
             id_number=request.data.get("id_number", ""),
@@ -372,6 +448,8 @@ def tenant_self_register(request):
             email_address=data["email"],
             alternative_phone=request.data.get("alternative_phone", "")
         )
+        
+
         return Response({
             "message": "Tenant account created successfully — you can now browse and apply for properties",
             "user": UserSerializer(user).data
@@ -380,6 +458,178 @@ def tenant_self_register(request):
         return Response({"error": "Email or phone number already exists."}, status=status.HTTP_409_CONFLICT)
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+# ==================================================
+# Shared: Convert a lead request into a tenant account
+# (reuses existing accounts — never creates duplicates)
+# ==================================================
+@transaction.atomic
+def convert_lead_to_tenant_account(actor, req, landlord=None):
+    """
+    Convert a house-hunting rental request into a linked tenant account.
+
+    Key principle: REUSE an existing account whenever possible — never create
+    a duplicate. If an account already exists (by email, normalized phone, or
+    full-name match), that exact account is granted the tenant role/privilege
+    and linked to the request. A brand-new account is created ONLY as a last
+    resort when nothing matches.
+
+    actor     = authenticated User performing the action (landlord or admin)
+    req       = RentalRequest instance
+    landlord  = Landlord profile to mark as registered_by (None for admin)
+    """
+    import random
+    import string
+
+    # Already linked to a tenant → just adopt/link it.
+    if req.tenant:
+        profile = req.tenant
+        if landlord and not profile.registered_by:
+            profile.registered_by = landlord
+            profile.save(update_fields=['registered_by'])
+        return {
+            "message": f"'{profile.full_name}' was already a tenant — now linked to your portfolio.",
+            "reused_existing": True,
+            "tenant": TenantProfileSerializer(profile).data,
+        }
+
+    full_name = (req.lead_name or "").strip()
+    phone = (req.lead_phone or "").strip()
+    email = (req.lead_email or "").strip()
+    norm_phone = normalize_phone(phone)
+
+    # 1) Try to find an existing account to reuse (email → phone → full name)
+    existing_user = None
+    if email:
+        existing_user = User.objects.filter(email__iexact=email).first()
+    if not existing_user and norm_phone:
+        existing_user = User.objects.filter(phone_number=norm_phone).first()
+    if not existing_user and phone:
+        existing_user = User.objects.filter(phone_number=phone).first()
+    if not existing_user and full_name:
+        t = Tenant.objects.filter(full_name__iexact=full_name).first()
+        if t:
+            existing_user = t.user
+
+    if existing_user:
+        # Reuse the exact same account — attach/grant tenant privilege.
+        if hasattr(existing_user, 'tenant'):
+            profile = existing_user.tenant
+            # Fill any missing contact details from the lead
+            if not profile.full_name and full_name:
+                profile.full_name = full_name
+            if not profile.phone and phone:
+                profile.phone = phone
+            if not profile.email_address and email:
+                profile.email_address = email
+            profile.save()
+        else:
+            # Account exists but has no tenant profile (e.g. admin/landlord) —
+            # attach a tenant profile to the SAME user, never a duplicate user.
+            unique_id = existing_user.username
+            n = 1
+            while Tenant.objects.filter(id_number=unique_id).exists():
+                unique_id = f"{existing_user.username}-t{n}"
+                n += 1
+            profile = Tenant.objects.create(
+                user=existing_user,
+                full_name=full_name or existing_user.get_full_name() or existing_user.username,
+                id_number=unique_id,
+                phone=phone or existing_user.phone_number,
+                email_address=email or existing_user.email,
+            )
+
+        req.tenant = profile
+        req.save(update_fields=['tenant'])
+
+        # Grant the tenant role/privilege on the reused account
+        if existing_user.role != 'tenant':
+            existing_user.role = 'tenant'
+            existing_user.save(update_fields=['role'])
+
+        if landlord and not profile.registered_by:
+            profile.registered_by = landlord
+            profile.save(update_fields=['registered_by'])
+
+        return {
+            "message": f"Reused existing account for {profile.full_name} — same email/password still works.",
+            "reused_existing": True,
+            "tenant": TenantProfileSerializer(profile).data,
+            "login_email": existing_user.email,
+            "login_phone": existing_user.phone_number,
+        }
+
+    # 2) Last resort — no existing account found; create a brand-new one.
+    generated_password = ''.join(random.choices(string.ascii_letters + string.digits, k=10))
+    base_username = ''.join(filter(str.isalnum, (full_name or 'tenant').lower().split())) or f"tenant{random.randint(100, 999)}"
+    username = base_username
+    idx = 1
+    while User.objects.filter(username=username).exists():
+        username = f"{base_username}{idx}"
+        idx += 1
+
+    new_email = email or f"{username}@tenant.local"
+    while User.objects.filter(email__iexact=new_email).exists():
+        new_email = f"{username}{idx}@tenant.local"
+        idx += 1
+
+    new_phone = norm_phone or phone or f"07{random.randint(1000000, 9999999)}"
+    while User.objects.filter(phone_number=new_phone).exists():
+        new_phone = f"07{random.randint(1000000, 9999999)}"
+
+    new_user = User.objects.create_user(
+        email=new_email,
+        username=username,
+        phone_number=new_phone,
+        password=generated_password,
+        role="tenant",
+    )
+
+    unique_id = username
+    while Tenant.objects.filter(id_number=unique_id).exists():
+        unique_id = f"{username}{idx}"
+        idx += 1
+
+    profile = Tenant.objects.create(
+        user=new_user,
+        full_name=full_name or new_user.username,
+        id_number=unique_id,
+        phone=phone or new_user.phone_number,
+        email_address=email or new_user.email,
+    )
+    if landlord:
+        profile.registered_by = landlord
+        profile.save(update_fields=['registered_by'])
+
+    req.tenant = profile
+    req.save(update_fields=['tenant'])
+
+    return {
+        "message": f"Tenant account created for {profile.full_name} — they can log in with their email/phone and password.",
+        "reused_existing": False,
+        "tenant": TenantProfileSerializer(profile).data,
+        "generated_password": generated_password,
+        "login_email": new_user.email,
+        "login_phone": new_user.phone_number,
+    }
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+@transaction.atomic
+def admin_convert_rental_request(request, request_id):
+    """Admin-only: convert any lead request into a tenant account (reuses existing)."""
+    if request.user.role != 'admin':
+        return Response({"error": "Admin access only."}, status=status.HTTP_403_FORBIDDEN)
+
+    try:
+        req = RentalRequest.objects.get(pk=request_id)
+    except RentalRequest.DoesNotExist:
+        return Response({"error": "Request not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    result = convert_lead_to_tenant_account(request.user, req, landlord=None)
+    return Response(result)
 
 
 # ==================================================
@@ -437,8 +687,24 @@ def rental_request_detail(request, request_id):
     if request.method == 'PUT':
         serializer = RentalRequestSerializer(req, data=request.data, partial=True)
         if serializer.is_valid():
+            new_status = serializer.validated_data.get('status', req.status)
             serializer.save()
-            return Response({"message": "Request updated successfully", "rental_request": serializer.data})
+
+            # When a request is APPROVED, automatically grant/link the tenant
+            # account (reuse existing account; no duplicate creation).
+            converted_info = None
+            if new_status == 'APPROVED':
+                landlord = req.landlord if req.landlord else (getattr(req.property, 'landlord', None))
+                if req.property and hasattr(req.property, 'landlord'):
+                    landlord = req.property.landlord
+                # Only auto-convert if there's lead info to work with OR it's already linked
+                if req.tenant or req.lead_name or req.lead_phone or req.lead_email:
+                    converted_info = convert_lead_to_tenant_account(user, req, landlord=landlord)
+
+            data = RentalRequestSerializer(req).data
+            if converted_info:
+                data['converted_tenant'] = converted_info
+            return Response({"message": "Request updated successfully", "rental_request": data})
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     if request.method == 'DELETE':
         req.delete()

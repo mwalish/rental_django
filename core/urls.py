@@ -43,6 +43,7 @@ urlpatterns = [
     # ==============================================
     path('rental-requests/', views.rental_request_list_create, name='rental-request-list-create'),
     path('rental-requests/<int:request_id>/', views.rental_request_detail, name='rental-request-detail'),
+    path('rental-requests/<int:request_id>/convert-to-tenant/', views.admin_convert_rental_request, name='admin-request-convert-to-tenant'),
     path('properties/available/', views.available_properties, name='available-properties'),
 
     # ==============================================
@@ -85,6 +86,7 @@ urlpatterns = [
     # ==============================================
     path('house-hunting/properties/', views.available_properties, name='house-hunting-properties'),
     path('house-hunting/register/', views.tenant_self_register, name='tenant-self-register'),
+    path('house-hunting/request/', views.house_hunting_request, name='house-hunting-request'),
 
     # ==============================================
     # Super Admin System Overview

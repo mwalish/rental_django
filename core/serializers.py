@@ -118,6 +118,16 @@ class TenantCreateSerializer(serializers.ModelSerializer):
         }
         validated_data.pop('password_confirm')
         user = User.objects.create_user(role='tenant', **validated_data)
+
+        # If the request came from a landlord, track who registered this tenant
+        landlord = self.context.get('landlord') if hasattr(self, 'context') else None
+        if landlord is None:
+            request = self.context.get('request') if hasattr(self, 'context') else None
+            if request and getattr(request.user, 'role', None) == 'landlord' and hasattr(request.user, 'landlord_profile'):
+                landlord = request.user.landlord_profile
+        if landlord is not None:
+            profile_data['registered_by'] = landlord
+
         return Tenant.objects.create(user=user, **profile_data)
 
 
@@ -137,15 +147,27 @@ class LandlordProfileSerializer(serializers.ModelSerializer):
 
 
 class TenantProfileSerializer(serializers.ModelSerializer):
-    """Full read/write for Tenant profile — validates unique ID and contact numbers."""
+    """Full read/write for Tenant profile — validates unique ID and contact numbers.
+
+    Includes derived display fields so landlords/admins can see the tenant's
+    login email and who registered them (useful for the tenants list & detail).
+    """
+    user_email = serializers.EmailField(source='user.email', read_only=True, allow_null=True)
+    registered_by_name = serializers.CharField(source='registered_by.full_name', read_only=True, allow_null=True)
+    status = serializers.SerializerMethodField(read_only=True)
+
     class Meta:
         model = Tenant
         fields = [
             'id', 'full_name', 'id_number', 'phone', 'alternative_phone',
             'email_address', 'join_date', 'exit_date', 'profile_picture',
-            'created_at', 'updated_at'
+            'created_at', 'updated_at',
+            'user_email', 'registered_by_name', 'status'
         ]
         read_only_fields = ['join_date', 'created_at', 'updated_at']
+
+    def get_status(self, obj):
+        return 'ACTIVE' if getattr(obj.user, 'is_active', True) else 'INACTIVE'
 
     def validate_id_number(self, value):
         if Tenant.objects.filter(id_number=value).exists():
@@ -162,7 +184,16 @@ class TenantProfileSerializer(serializers.ModelSerializer):
 # Core Business Serializers
 # ==================================================
 class PropertySerializer(serializers.ModelSerializer):
-    """Property listings — landlord is auto-set from authenticated user."""
+    """Property listings — landlord is auto-set from authenticated user.
+    Includes landlord contact details so the house-hunting portal shows
+    real owner info on each listing.
+    Now supports multiple photos via the `photos` JSONField (array of base64 strings).
+    """
+    landlord_name = serializers.CharField(source='landlord.full_name', read_only=True)
+    landlord_phone = serializers.CharField(source='landlord.phone', read_only=True)
+    landlord_email = serializers.EmailField(source='landlord.user.email', read_only=True, allow_null=True)
+    landlord_business = serializers.CharField(source='landlord.business_name', read_only=True, allow_null=True)
+
     class Meta:
         model = Property
         fields = "__all__"
@@ -170,8 +201,18 @@ class PropertySerializer(serializers.ModelSerializer):
 
 
 class RentalRequestSerializer(serializers.ModelSerializer):
-    """Tenant rental applications — includes display names for UI convenience."""
-    tenant_name = serializers.CharField(source='tenant.full_name', read_only=True)
+    """Tenant rental applications — includes display names for UI convenience.
+
+    Supports guest/lead inquiries where no tenant account exists: applicant
+    contact info is stored in lead_name / lead_phone / lead_email instead.
+
+    Also exposes the linked tenant's profile contact details (phone, email,
+    ID number) so the landlord can see who applied for their houses.
+    """
+    tenant_name = serializers.SerializerMethodField(read_only=True)
+    tenant_phone = serializers.CharField(source='tenant.phone', read_only=True, allow_null=True)
+    tenant_email = serializers.EmailField(source='tenant.email_address', read_only=True, allow_null=True)
+    tenant_id_number = serializers.CharField(source='tenant.id_number', read_only=True, allow_null=True)
     landlord_name = serializers.CharField(source='landlord.full_name', read_only=True)
     property_title = serializers.CharField(source='property.title', read_only=True)
     property_location = serializers.CharField(source='property.location', read_only=True)
@@ -181,14 +222,23 @@ class RentalRequestSerializer(serializers.ModelSerializer):
         model = RentalRequest
         fields = [
             'id', 'property', 'property_title', 'property_location',
-            'tenant', 'tenant_name', 'landlord', 'landlord_name',
+            'tenant', 'tenant_name', 'tenant_phone', 'tenant_email', 'tenant_id_number',
+            'landlord', 'landlord_name',
+            'lead_name', 'lead_phone', 'lead_email',
             'message', 'landlord_notes', 'status', 'status_display',
             'created_at', 'updated_at'
         ]
         read_only_fields = [
             'id', 'tenant', 'landlord', 'created_at', 'updated_at',
-            'tenant_name', 'landlord_name', 'property_title', 'property_location', 'status_display'
+            'tenant_name', 'tenant_phone', 'tenant_email', 'tenant_id_number',
+            'landlord_name', 'property_title', 'property_location', 'status_display'
         ]
+
+    def get_tenant_name(self, obj):
+        """Return linked tenant's full name, falling back to guest lead name."""
+        if obj.tenant:
+            return obj.tenant.full_name
+        return obj.lead_name
 
 
 class MeetingSerializer(serializers.ModelSerializer):

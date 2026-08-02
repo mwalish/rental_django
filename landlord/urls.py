@@ -10,11 +10,13 @@ urlpatterns = [
 
     # Properties
     path("properties/", views.property_list, name="landlord-properties"),
+    path("properties/<int:property_id>/applicants/", views.property_applicants, name="landlord-property-applicants"),
     path("properties/<int:pk>/", views.property_detail, name="landlord-property-detail"),
 
     # Rental Requests
     path("rental-requests/", views.rental_requests, name="landlord-rental-requests"),
     path("rental-requests/<int:pk>/", views.rental_requests, name="landlord-rental-request-detail"),
+    path("rental-requests/<int:request_id>/convert-to-tenant/", views.convert_lead_to_tenant, name="landlord-request-convert-to-tenant"),
 
     # Meetings — ✅ Matches your working view names
     path("meetings/", views.meetings, name="landlord-meetings"),
@@ -30,4 +32,5 @@ urlpatterns = [
 
     # Tenants — list tenants linked to the landlord's properties
     path("tenants/", views.tenants, name="landlord-tenants"),
+    path("registered-tenants/", views.registered_tenants, name="landlord-registered-tenants"),
 ]
