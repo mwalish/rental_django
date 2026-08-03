@@ -29,6 +29,7 @@ urlpatterns = [
     path("register/", views.Register, name="register"),
     path("login/", views.Login, name="login"),
     path("profile/", views.ProfileView, name="profile"),
+    path("change-password/", views.change_password, name="change-password"),
     path("logout/", views.logout_user, name="logout"),
     path("password/send-reset-code/", views.send_reset_code, name="send-reset-code"),
     path("password/confirm-reset/", views.confirm_password_reset, name="confirm-reset"),
@@ -87,6 +88,7 @@ urlpatterns = [
     path('house-hunting/properties/', views.available_properties, name='house-hunting-properties'),
     path('house-hunting/register/', views.tenant_self_register, name='tenant-self-register'),
     path('house-hunting/request/', views.house_hunting_request, name='house-hunting-request'),
+    path('house-hunting/request-status/', views.house_hunting_request_status, name='house-hunting-request-status'),
 
     # ==============================================
     # Super Admin System Overview

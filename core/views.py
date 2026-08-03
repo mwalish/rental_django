@@ -312,6 +312,54 @@ def confirm_password_reset(request):
         return Response({"error": f"Password reset failed: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def change_password(request):
+    """
+    Change the logged-in user's password.
+    Body: { old_password, new_password }
+    Verifies the current password before updating. Blacklists refresh tokens
+    so the user must log in again with the new password.
+    """
+    user = request.user
+    old_password = request.data.get("old_password") or request.data.get("current_password")
+    new_password = request.data.get("new_password")
+
+    if not old_password or not new_password:
+        return Response(
+            {"error": "Both current password and new password are required."},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    if len(new_password) < 6:
+        return Response(
+            {"error": "New password must be at least 6 characters long."},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    if not user.check_password(old_password):
+        return Response(
+            {"error": "Current password is incorrect."},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    if old_password == new_password:
+        return Response(
+            {"error": "New password must be different from the current password."},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    user.password = make_password(new_password)
+    user.save()
+
+    # Blacklist all refresh tokens for this user so old sessions are invalid.
+    try:
+        from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
+        for token in OutstandingToken.objects.filter(user=user):
+            BlacklistedToken.objects.get_or_create(token=token)
+    except Exception:
+        pass
+
+    return Response({"message": "Password changed successfully. Please log in again."}, status=status.HTTP_200_OK)
+
+
 @api_view(["GET", "PUT", "PATCH"])
 @permission_classes([IsAuthenticated])
 def ProfileView(request):
@@ -420,6 +468,67 @@ def house_hunting_request(request):
         "message": "Request submitted successfully! The landlord or admin will contact you soon.",
         "request": RentalRequestSerializer(request_obj).data
     }, status=status.HTTP_201_CREATED)
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def house_hunting_request_status(request):
+    """
+    Public guest request-status lookup — NO login required.
+
+    Allows a guest (or any anonymous visitor) who submitted a rental inquiry
+    to check the current status of their request(s) by phone number or email.
+
+    Body: { phone: '07...', email: 'you@example.com' }  (at least one required)
+
+    Returns a list of matches (property, status, date, landlord, notes).
+    """
+    phone = (request.data.get('phone') or '').strip()
+    email = (request.data.get('email') or '').strip()
+
+    if not phone and not email:
+        return Response(
+            {"error": "Provide your phone number or email to look up your request."},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    qs = RentalRequest.objects.all().order_by('-created_at')
+
+    # Filter leads by phone (normalized + raw) and/or email
+    norm_phone = normalize_phone(phone) if phone else ''
+    q = Q()
+    if phone:
+        q |= Q(lead_phone__iexact=phone) | Q(lead_phone__iexact=norm_phone) | Q(lead_phone__contains=phone.strip())
+    if email:
+        q |= Q(lead_email__iexact=email)
+    qs = qs.filter(q)
+
+    # Exclude requests that ended up linked to a real tenant account — those
+    # users should use the normal logged-in "My Applications" tracker instead.
+    qs = qs.filter(tenant__isnull=True)
+
+    if not qs.exists():
+        return Response(
+            {"requests": [], "message": "No requests found for that phone or email."},
+            status=status.HTTP_200_OK
+        )
+
+    return Response({
+        "requests": [
+            {
+                "id": r.id,
+                "property_title": r.property.title if r.property else None,
+                "property_location": r.property.location if r.property else None,
+                "status": r.status,
+                "status_display": r.get_status_display(),
+                "landlord_name": r.landlord.full_name if r.landlord else None,
+                "landlord_notes": r.landlord_notes,
+                "message": r.message,
+                "created_at": r.created_at,
+            }
+            for r in qs
+        ]
+    }, status=status.HTTP_200_OK)
 
 
 @api_view(['POST'])
