@@ -26,10 +26,24 @@ from .models import (
 # ==================================================
 class UserSerializer(serializers.ModelSerializer):
     """Basic read/write serializer for User account data (excludes password)."""
+    full_name = serializers.SerializerMethodField()
+
     class Meta:
         model = User
-        fields = ['id', 'email', 'username', 'phone_number', 'role', 'date_joined']
+        fields = ['id', 'email', 'username', 'phone_number', 'role', 'date_joined', 'full_name', 'profile_picture']
         read_only_fields = ['id', 'date_joined']
+
+    def get_full_name(self, obj):
+        # The User model has no 'full_name' field — use getattr to be safe.
+        # The full name lives on the linked Landlord/Tenant profile instead.
+        if getattr(obj, 'full_name', None):
+            return obj.full_name
+        # Fall back to linked profile's full_name if present
+        if hasattr(obj, 'landlord_profile') and obj.landlord_profile.full_name:
+            return obj.landlord_profile.full_name
+        if hasattr(obj, 'tenant') and obj.tenant.full_name:
+            return obj.tenant.full_name
+        return obj.username
 
 
 class UserRegistrationSerializer(serializers.ModelSerializer):
@@ -386,3 +400,4 @@ class PaymentSerializer(serializers.ModelSerializer):
                 "current_balance_due": f"{outstanding:.2f}"
             })
         return data
+

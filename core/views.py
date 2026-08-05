@@ -223,6 +223,13 @@ def Login(request):
         profile_data = LandlordProfileSerializer(user.landlord_profile).data
     elif user.role == "tenant" and hasattr(user, "tenant"):
         profile_data = TenantProfileSerializer(user.tenant).data
+    elif user.role == "admin":
+        # Admirators have their picture/name stored on the User model.
+        profile_data = {
+            "full_name": user.full_name or user.username,
+            "phone": user.phone_number,
+            "profile_picture": user.profile_picture.url if user.profile_picture else None,
+        }
 
     return Response({
         "message": "Login successful",
@@ -363,10 +370,47 @@ def change_password(request):
 @api_view(["GET", "PUT", "PATCH"])
 @permission_classes([IsAuthenticated])
 def ProfileView(request):
-    """Get or update the logged-in user's profile (landlord or tenant)."""
+    """Get or update the logged-in user's profile (landlord, tenant, or admin)."""
     user = request.user
+
+    # Admin profiles live on the User model itself (name, phone, picture).
     if user.role == "admin":
-        return Response({"message": "Admin users do not have a separate profile."})
+        if request.method == "GET":
+            return Response({
+                "id": user.id,
+                "full_name": user.full_name or user.username,
+                "phone": user.phone_number,
+                "phone_number": user.phone_number,
+                "email": user.email,
+                "profile_picture": user.profile_picture.url if user.profile_picture else None,
+                "role": user.role,
+            })
+
+        # PATCH/PUT — update admin name / phone / picture.
+        data = request.data
+        if "full_name" in data and data.get("full_name"):
+            user.full_name = data.get("full_name")
+        if "phone" in data and data.get("phone"):
+            user.phone_number = data.get("phone")
+        if "phone_number" in data and data.get("phone_number"):
+            user.phone_number = data.get("phone_number")
+        # Optional multipart image upload
+        pic = request.FILES.get("profile_picture")
+        if pic:
+            user.profile_picture = pic
+        user.save()
+        return Response({
+            "message": "Profile updated successfully",
+            "profile": {
+                "id": user.id,
+                "full_name": user.full_name or user.username,
+                "phone": user.phone_number,
+                "phone_number": user.phone_number,
+                "email": user.email,
+                "profile_picture": user.profile_picture.url if user.profile_picture else None,
+                "role": user.role,
+            },
+        })
 
     try:
         if user.role == "landlord":
@@ -1471,7 +1515,12 @@ def admin_all_users(request):
         "role": u.role,
         "phone_number": u.phone_number,
         "is_active": u.is_active,
-        "date_joined": u.date_joined
+        "date_joined": u.date_joined,
+        "full_name": u.full_name or
+            (u.landlord_profile.full_name if hasattr(u, 'landlord_profile') and u.landlord_profile.full_name else None) or
+            (u.tenant.full_name if hasattr(u, 'tenant') and u.tenant.full_name else None) or
+            u.username,
+        "profile_picture": u.profile_picture.url if u.profile_picture else None,
     } for u in users]
 
     return Response({"users": data})
