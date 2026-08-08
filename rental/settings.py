@@ -124,7 +124,7 @@ WSGI_APPLICATION = 'rental.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': "django.db.backends.mysql",
-        'NAME': "lexnul_renta",
+        'NAME': "lexnul_rental",
         'HOST': "mysql-lexnul.alwaysdata.net",
         'USER': "lexnul",
         'PASSWORD': "mwalish",
