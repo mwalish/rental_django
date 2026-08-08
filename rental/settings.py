@@ -211,6 +211,18 @@ MPESA_SHORTCODE = env('MPESA_SHORTCODE', default='174379')
 MPESA_PASSKEY = env('MPESA_PASSKEY', default='')
 MPESA_CALLBACK_URL = env('MPESA_CALLBACK_URL', default='')
 
+# ====================== EMAIL SETTINGS ======================
+# Default: console backend — prints emails to the terminal in development so the
+# email OTP flow works with ZERO external credentials. For real delivery, set
+# EMAIL_BACKEND=smtp + the EMAIL_HOST/PORT/USER/PASSWORD vars in your .env.
+EMAIL_BACKEND = env('EMAIL_BACKEND', default='django.core.mail.backends.console.EmailBackend')
+EMAIL_HOST = env('EMAIL_HOST', default='smtp.gmail.com')
+EMAIL_PORT = env.int('EMAIL_PORT', default=587)
+EMAIL_USE_TLS = env.bool('EMAIL_USE_TLS', default=True)
+EMAIL_HOST_USER = env('EMAIL_HOST_USER', default='')
+EMAIL_HOST_PASSWORD = env('EMAIL_HOST_PASSWORD', default='')
+DEFAULT_FROM_EMAIL = env('DEFAULT_FROM_EMAIL', default='Smart Rental System <noreply@smartrent.local>')
+
 # ====================== PASSWORD RESET SETTINGS ======================
 PASSWORD_RESET_CODE_LENGTH = 6
 PASSWORD_RESET_CODE_EXPIRE_MINUTES = 15

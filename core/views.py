@@ -267,28 +267,72 @@ def logout_user(request):
         return Response({"error": f"Logout failed: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+def send_reset_code_email(user, reset_code):
+    """Send the OTP reset code to the user's email using Django's email system.
+
+    In development (default EMAIL_BACKEND = console.EmailBackend) the email is
+    printed to the server terminal, so the full flow works with ZERO external
+    credentials. In production, configure SMTP via env vars (see settings.py).
+    """
+    from django.core.mail import send_mail
+    subject = "Smart Rental System — Password Reset Code"
+    message = (
+        f"Hello {user.full_name or user.username},\n\n"
+        f"Your password reset code is: {reset_code}\n\n"
+        f"This code expires in {getattr(settings, 'PASSWORD_RESET_EXPIRE_MINUTES', 15)} minutes.\n"
+        f"Do NOT share this code with anyone.\n\n"
+        f"Thank you,\nSmart Rental System"
+    )
+    send_mail(
+        subject,
+        message,
+        getattr(settings, "DEFAULT_FROM_EMAIL", "noreply@smartrent.local"),
+        [user.email],
+        fail_silently=False,
+    )
+
+
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def send_reset_code(request):
-    """Sends 6-digit SMS reset code to user's registered phone number."""
-    phone = request.data.get('phone')
-    if not phone:
-        return Response({"error": "Phone number is required"}, status=status.HTTP_400_BAD_REQUEST)
+    """Sends a 6-digit reset code to the user via email OR SMS.
 
-    phone = normalize_phone(phone)  # ✅ Reuse helper instead of duplicate code
+    Body: { email } OR { phone }. The user is looked up by whichever identifier
+    is provided. If `email` is given, the code is emailed (Django's built-in
+    email system). If `phone` is given, the code is sent via Africa's Talking
+    SMS (requires an API key). Both are the same OTP stored in PasswordResetCode.
+    """
+    email = (request.data.get('email') or '').strip().lower()
+    phone = (request.data.get('phone') or '').strip()
+
+    if not email and not phone:
+        return Response({"error": "Email or phone number is required"}, status=status.HTTP_400_BAD_REQUEST)
 
     try:
-        user = User.objects.filter(phone_number=phone).first()
-        if not user:
-            return Response({"message": "If this number is registered, a reset code was sent"}, status=status.HTTP_200_OK)
+        # Look up user by email OR normalized phone
+        user = None
+        if email:
+            user = User.objects.filter(email__iexact=email).first()
+        if not user and phone:
+            user = User.objects.filter(phone_number=normalize_phone(phone)).first()
 
+        # Always return a generic message to avoid account enumeration.
+        if not user:
+            return Response({"message": "If this account is registered, a reset code was sent"}, status=status.HTTP_200_OK)
+
+        # Invalidate any previous unused codes for this user.
         PasswordResetCode.objects.filter(user=user, is_used=False).update(is_used=True)
         reset_code = ''.join(str(random.randint(0, 9)) for _ in range(6))
         expires_at = timezone.now() + timedelta(minutes=getattr(settings, "PASSWORD_RESET_EXPIRE_MINUTES", 15))
         PasswordResetCode.objects.create(user=user, code=reset_code, expires_at=expires_at)
 
+        # Deliver via email if provided (alternative that needs no SMS key), else via SMS.
+        if email:
+            send_reset_code_email(user, reset_code)
+            return Response({"status": "success", "message": "Reset code sent to your email"}, status=status.HTTP_200_OK)
+
         msg = f"Your Smart Rental System reset code: {reset_code}. Expires in 15 minutes. Do NOT share this code."
-        sms.send(msg, [phone], sender_id=getattr(settings, "AFRICAS_TALKING_SENDER_ID", "RENTAL"))
+        sms.send(msg, [normalize_phone(phone)], sender_id=getattr(settings, "AFRICAS_TALKING_SENDER_ID", "RENTAL"))
         return Response({"status": "success", "message": "Reset code sent to your phone"}, status=status.HTTP_200_OK)
     except Exception as e:
         return Response({"error": f"Failed to send code: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -297,22 +341,31 @@ def send_reset_code(request):
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def confirm_password_reset(request):
-    """Verifies reset code and updates password securely."""
-    phone = request.data.get('phone')
-    code = request.data.get('code')
+    """Verifies reset code and updates password securely.
+
+    Body: { email OR phone, code, new_password } — the user is found by whichever
+    identifier they used when requesting the code.
+    """
+    email = (request.data.get('email') or '').strip().lower()
+    phone = (request.data.get('phone') or '').strip()
+    code = (request.data.get('code') or '').strip()
     new_password = request.data.get('new_password')
 
-    if not all([phone, code, new_password]):
-        return Response({"error": "Phone number, reset code, and new password are all required"}, status=status.HTTP_400_BAD_REQUEST)
+    if not (email or phone):
+        return Response({"error": "Email or phone number is required"}, status=status.HTTP_400_BAD_REQUEST)
+    if not all([code, new_password]):
+        return Response({"error": "Reset code and new password are required"}, status=status.HTTP_400_BAD_REQUEST)
     if len(new_password) < 6:
         return Response({"error": "New password must be at least 6 characters long"}, status=status.HTTP_400_BAD_REQUEST)
 
-    phone = normalize_phone(phone)  # ✅ Reuse helper
-
     try:
-        user = User.objects.filter(phone_number=phone).first()
+        user = None
+        if email:
+            user = User.objects.filter(email__iexact=email).first()
+        if not user and phone:
+            user = User.objects.filter(phone_number=normalize_phone(phone)).first()
         if not user:
-            return Response({"error": "Invalid phone number or reset code"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": "Invalid email/phone number or reset code"}, status=status.HTTP_400_BAD_REQUEST)
 
         reset_entry = PasswordResetCode.objects.filter(
             user=user, code=code, is_used=False, expires_at__gt=timezone.now()
