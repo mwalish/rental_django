@@ -29,7 +29,10 @@ django-environ>=0.11,<1
 requests>=2.31,<3
 
 # SMS integration
-africastalking>=3.0,<4
+# Latest published africastalking on PyPI is 2.0.3 (no 3.x exists). Pin to 2.x,
+# which supports Python 3.13 (alwaysdata default) and matches the code's
+# africastalking.initialize() / SMS.send() API.
+africastalking>=2.0,<3
 
 # Production server
 gunicorn>=22,<24
