@@ -108,19 +108,39 @@ WSGI_APPLICATION = 'rental.wsgi.application'
 # ------------------------------------------------------------------
 # Database — configure via env (MySQL in production)
 # ------------------------------------------------------------------
+# DATABASES = {
+#     'default': {
+#         'ENGINE': env('DB_ENGINE'),
+#         'NAME': env('DB_NAME'),
+#         'HOST': env('DB_HOST'),
+#         'PORT': env('DB_PORT'),
+#         'USER': env('DB_USER'),
+#         'PASSWORD': env('DB_PASSWORD'),
+#         'OPTIONS': {
+#             'charset': 'utf8mb4',
+#         } if env('DB_ENGINE') == 'django.db.backends.mysql' else {},
+#     }
+# }
 DATABASES = {
     'default': {
-        'ENGINE': env('DB_ENGINE'),
-        'NAME': env('DB_NAME'),
-        'HOST': env('DB_HOST'),
-        'PORT': env('DB_PORT'),
-        'USER': env('DB_USER'),
-        'PASSWORD': env('DB_PASSWORD'),
+        'ENGINE': "django.db.backends.mysql",
+        'NAME': "lexnul_renta",
+        'HOST': "mysql-lexnul.alwaysdata.net",
+        'USER': "lexnul",
+        'PASSWORD': "mwalish",
         'OPTIONS': {
             'charset': 'utf8mb4',
         } if env('DB_ENGINE') == 'django.db.backends.mysql' else {},
     }
 }
+# --- Database (MySQL in production) ---
+# DB_ENGINE=
+# DB_NAME=lexnul_rental
+# DB_HOST=mysql-lexnul.alwaysdata.net
+# DB_PORT=3306
+# DB_USER=
+# DB_PASSWORD=mwalish
+
 
 # ------------------------------------------------------------------
 # Password validation
