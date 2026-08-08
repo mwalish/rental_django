@@ -2,12 +2,12 @@
 Root-level WSGI entry point for the Smart Rental System.
 
 This file is the deployment entry point used by ALWAYSDATA.
-It corresponds to the WSGI file configured at:
+It sits at the root of the uploaded project (next to manage.py) and simply
+wires up the real Django WSGI application from the `rental` package, exposing
+a module-level variable named `application`.
 
-    /home/lexnul/www/maziwasync/syncbck/wsgi.py
-
-It simply wires up the real Django WSGI application from the `rental`
-package and must expose a module-level variable named `application`.
+On alwaysdata, set the site's "Application path" to the directory containing
+this file (relative to /home/lexnul/), e.g.  www/rental/
 """
 import os
 import sys
