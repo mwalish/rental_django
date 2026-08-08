@@ -25,8 +25,9 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 env = environ.Env(
     DEBUG=(bool, False),
     SECRET_KEY=(str, ''),
-    ALLOWED_HOSTS=(list, ['localhost', '127.0.0.1']),
-    CORS_ALLOWED_ORIGINS=(list, []),
+    ALLOWED_HOSTS=(list, ['localhost', '127.0.0.1', 'lexnul.alwaysdata.net']),
+    CORS_ALLOWED_ORIGINS=(list, ['https://lexnul.alwaysdata.net']),
+    CSRF_TRUSTED_ORIGINS=(list, []),
     DB_ENGINE=(str, 'django.db.backends.sqlite3'),
     DB_NAME=(str, str(BASE_DIR / 'db.sqlite3')),
     DB_HOST=(str, 'localhost'),
@@ -238,6 +239,10 @@ if cors_origins:
 else:
     CORS_ALLOW_ALL_ORIGINS = DEBUG
     CORS_ALLOWED_ORIGINS = []
+
+# Trusted CSRF origins — required for the Django admin and any POST/CSRF flows
+# when the site is served over HTTPS on alwaysdata.
+CSRF_TRUSTED_ORIGINS = env('CSRF_TRUSTED_ORIGINS')
 
 # ====================== PRODUCTION SECURITY HARDENING ======================
 # These are enabled when DEBUG is False. Adjust via env if your deployment
