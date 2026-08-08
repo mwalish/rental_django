@@ -50,6 +50,31 @@ class User(AbstractUser):
     USERNAME_FIELD = 'email'
     REQUIRED_FIELDS = ['username', 'phone_number']
 
+    @property
+    def full_name(self):
+        """Full display name for any user (admin/landlord/tenant).
+
+        The User model has no dedicated 'full_name' DB column — the full name
+        lives on the linked Landlord/Tenant profile for those roles. For admins
+        (and any user without a linked profile) we build the name from the
+        inherited first_name/last_name, falling back to the username so this
+        property ALWAYS resolves without raising an AttributeError.
+        """
+        name = " ".join(part for part in (self.first_name, self.last_name) if part).strip()
+        return name or self.username
+
+    @full_name.setter
+    def full_name(self, value):
+        """Store the admin's full name on the inherited first_name column.
+
+        This lets callers do `user.full_name = "<name>"` and have it persisted
+        to the database (first_name + last_name) instead of being silently lost.
+        """
+        value = (value or "").strip()
+        parts = value.split()
+        self.first_name = parts[0] if parts else ""
+        self.last_name = " ".join(parts[1:]) if len(parts) > 1 else ""
+
     def __str__(self):
         return f"{self.username} ({self.role})"
 
@@ -137,8 +162,8 @@ class Property(models.Model):
     has_water = models.BooleanField(default=True)
     has_electricity = models.BooleanField(default=True)
     photos = models.JSONField(default=list, blank=True, help_text="Array of base64 image strings for property photos")
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='AVAILABLE')
-    created_at = models.DateTimeField(auto_now_add=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='AVAILABLE', db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
@@ -182,9 +207,9 @@ class RentalRequest(models.Model):
     lead_phone = models.CharField(max_length=20, blank=True, null=True, help_text="Phone number from guest inquiry")
     lead_email = models.EmailField(blank=True, null=True, help_text="Email from guest inquiry")
     message = models.TextField(blank=True, null=True, help_text="Tenant's application note")
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='PENDING')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='PENDING', db_index=True)
     landlord_notes = models.TextField(blank=True, null=True, help_text="Landlord feedback")
-    created_at = models.DateTimeField(auto_now_add=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
@@ -240,8 +265,8 @@ class Lease(models.Model):
         ('EXPIRED', 'Expired'),
         ('TERMINATED', 'Terminated'),
     )
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='PENDING')
-    created_at = models.DateTimeField(auto_now_add=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='PENDING', db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
@@ -270,12 +295,13 @@ class Payment(models.Model):
         ('COMPLETED', 'Completed'),
         ('FAILED', 'Failed'),
     )
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='PENDING')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='PENDING', db_index=True)
     transaction_id = models.CharField(max_length=100, blank=True, null=True)
-    created_at = models.DateTimeField(auto_now_add=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
     receipt_number = models.CharField(max_length=50, unique=True, null=True, blank=True, db_index=True)
     receipt_issued_at = models.DateTimeField(null=True, blank=True)
+    issued_by = models.CharField(max_length=100, blank=True, null=True, help_text="Name of the person/system that issued the receipt")
     covered_months = models.JSONField(default=list, blank=True)
     balance_after_payment = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     mpesa_checkout_request_id = models.CharField(max_length=100, blank=True, null=True, unique=True)
@@ -287,8 +313,69 @@ class Payment(models.Model):
         if self.status == 'COMPLETED' and not self.receipt_issued_at:
             raise ValidationError('Completed payments must have a receipt issued date.')
 
+    def save(self, *args, **kwargs):
+        """
+        Auto-populate receipt fields whenever a payment is saved as COMPLETED.
+
+        Fixes the bug where a payment created directly as COMPLETED (e.g. via the
+        landlord "New Payment" form) displayed empty Receipt No., Issued On,
+        Issued By, and Covers Months on the receipt. This centralizes the receipt
+        logic so it works across ALL creation paths.
+
+        Fields explicitly set by the verify flows (verify_payment, payment_detail)
+        are left untouched — only MISSING fields are filled in.
+        """
+        if self.status == 'COMPLETED':
+            # 1) Issued by — the LANDLORD is the official issuer of the receipt.
+            #    Never fall back to the tenant: receipts are issued by the owner,
+            #    not by the person paying.
+            if not self.issued_by:
+                try:
+                    landlord = self.lease.property.landlord if self.lease_id else None
+                    self.issued_by = (landlord.full_name or landlord.business_name or 'System') if landlord else 'System'
+                except Exception:
+                    self.issued_by = 'System'
+
+            # 2) Issued at — now if missing
+            if not self.receipt_issued_at:
+                self.receipt_issued_at = timezone.now()
+
+            # 3) Covered months + balance — compute if missing
+            if not self.covered_months and self.lease_id:
+                try:
+                    from .views import calculate_covered_months
+                    mr = Decimal(self.lease.monthly_rent)
+                    amt = Decimal(self.amount)
+                    covered, remaining = calculate_covered_months(
+                        self.lease.start_date, amt, mr, self.lease.end_date
+                    )
+                    if not self.covered_months:
+                        self.covered_months = covered
+                    if self.balance_after_payment is None:
+                        self.balance_after_payment = remaining
+                except Exception:
+                    pass
+
+            # 4) Receipt number — needs the DB id, set on first save
+            if not self.receipt_number:
+                # Save first to get the id, then set number + save again.
+                # IMPORTANT: strip force_insert before the second save — otherwise
+                # Django tries to INSERT again with the same PK → IntegrityError.
+                force_insert = kwargs.pop('force_insert', False)
+                if not self.pk:
+                    super().save(*args, **kwargs)
+                self.receipt_number = f"RCP-{self.pk}-{int(timezone.now().timestamp())}"
+                if kwargs.get('update_fields'):
+                    super().save(update_fields=['receipt_number'])
+                else:
+                    super().save(*args, **kwargs)
+                return
+
+        super().save(*args, **kwargs)
+
     def __str__(self):
         return f"{self.lease.tenant.full_name} - KSh {self.amount}"
+
 
 # ------------------------------
 # Maintenance Request Model — tenants report issues; landlords track resolution
@@ -303,8 +390,8 @@ class Maintenance(models.Model):
         ('IN_PROGRESS', 'In Progress'),
         ('COMPLETED', 'Completed'),
     )
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='PENDING')
-    created_at = models.DateTimeField(auto_now_add=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='PENDING', db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):

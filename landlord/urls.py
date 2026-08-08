@@ -1,5 +1,6 @@
 from django.urls import path
 from . import views
+from core import views as core_views
 
 urlpatterns = [
     # Dashboard
@@ -33,4 +34,8 @@ urlpatterns = [
     # Tenants — list tenants linked to the landlord's properties
     path("tenants/", views.tenants, name="landlord-tenants"),
     path("registered-tenants/", views.registered_tenants, name="landlord-registered-tenants"),
+
+    # Maintenance — reuses the role-aware core views (landlord-filtered)
+    path("maintenance/", core_views.maintenance_list_create, name="landlord-maintenance"),
+    path("maintenance/<int:maintenance_id>/", core_views.maintenance_detail, name="landlord-maintenance-detail"),
 ]

@@ -2,9 +2,10 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
-from django.db.models import Count, Sum, Q
+from django.db.models import Sum
 from django.db import transaction
-from datetime import datetime
+from decimal import Decimal
+from django.utils import timezone
 from django.conf import settings
 
 User = settings.AUTH_USER_MODEL
@@ -61,15 +62,16 @@ def dashboard(request):
 
     payments = Payment.objects.filter(
         lease__property__landlord=landlord,
-        status="completed"
+        status="COMPLETED"
     )
-    total_income = payments.aggregate(total=Sum("amount"))["total"] or 0
+    total_income = payments.aggregate(total=Sum("amount"))["total"] or Decimal("0")
 
-    today = datetime.today()
+    # Use timezone-aware `now()` so month filtering matches the DB (USE_TZ=True).
+    now = timezone.now()
     monthly_income = payments.filter(
-        payment_date__year=today.year,
-        payment_date__month=today.month
-    ).aggregate(month_total=Sum("amount"))["month_total"] or 0
+        payment_date__year=now.year,
+        payment_date__month=now.month
+    ).aggregate(month_total=Sum("amount"))["month_total"] or Decimal("0")
 
     data = {
         "summary": {
@@ -307,15 +309,30 @@ def payments(request):
 
     if request.method == "GET":
         payments = Payment.objects.filter(lease__property__landlord=landlord)
-        serializer = PaymentSerializer(payments, many=True)
+        serializer = PaymentSerializer(payments, many=True, context={'request': request})
         return Response(serializer.data)
 
     if request.method == "POST":
-        serializer = PaymentSerializer(data=request.data)
+        serializer = PaymentSerializer(data=request.data, context={'request': request})
         if serializer.is_valid():
-            serializer.save()
+            payment = serializer.save()
+
+            # If the landlord records a payment directly as COMPLETED, ensure the
+            # receipt fields are fully populated (issuer = landlord, covered months,
+            # balance, receipt number).
+            if payment.status == "COMPLETED":
+                if not payment.issued_by:
+                    payment.issued_by = landlord.full_name or landlord.business_name or request.user.username
+                from core.views import calculate_covered_months
+                mr = Decimal(payment.lease.monthly_rent)
+                amt = Decimal(payment.amount)
+                covered, remaining = calculate_covered_months(payment.lease.start_date, amt, mr, payment.lease.end_date)
+                payment.covered_months = covered
+                payment.balance_after_payment = remaining
+                payment.save()
+
             return Response(
-                {"message": "Payment recorded", "data": serializer.data},
+                {"message": "Payment recorded", "data": PaymentSerializer(payment, context={'request': request}).data},
                 status=status.HTTP_201_CREATED
             )
         return Response({"error": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
@@ -334,13 +351,35 @@ def payment_detail(request, pk):
         return Response({"error": "Payment not found"}, status=status.HTTP_404_NOT_FOUND)
 
     if request.method == "GET":
-        return Response(PaymentSerializer(pay).data)
+        return Response(PaymentSerializer(pay, context={'request': request}).data)
 
     if request.method == "PUT":
-        s = PaymentSerializer(pay, data=request.data, partial=True)
+        s = PaymentSerializer(pay, data=request.data, partial=True, context={'request': request})
         if s.is_valid():
-            s.save()
-            return Response({"message": "Updated", "data": s.data})
+            payment = s.save()
+
+            # When a payment is marked COMPLETED, capture the issuer + receipt info
+            # so the printed receipt shows WHO verified it and WHEN.
+            if payment.status == "COMPLETED":
+                if not payment.receipt_number:
+                    payment.receipt_number = f"RCP-{payment.id}-{int(timezone.now().timestamp())}"
+                if not payment.receipt_issued_at:
+                    payment.receipt_issued_at = timezone.now()
+                # Issuer: explicit input, else the landlord's full name, else username
+                payment.issued_by = request.data.get("issued_by") or (
+                    landlord.full_name or
+                    (getattr(request.user, 'full_name', None) or request.user.username)
+                )
+                # Compute covered months + balance using the same logic as core.views
+                from core.views import calculate_covered_months
+                mr = Decimal(payment.lease.monthly_rent)
+                amt = Decimal(payment.amount)
+                covered, remaining = calculate_covered_months(payment.lease.start_date, amt, mr, payment.lease.end_date)
+                payment.covered_months = covered
+                payment.balance_after_payment = remaining
+                payment.save()
+
+            return Response({"message": "Updated", "data": PaymentSerializer(payment).data})
         return Response({"error": s.errors}, status=status.HTTP_400_BAD_REQUEST)
 
     if request.method == "DELETE":

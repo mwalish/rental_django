@@ -1,3 +1,4 @@
+import logging
 import random
 from decimal import Decimal
 from datetime import datetime, date, timedelta
@@ -43,6 +44,7 @@ from .serializers import (
 )
 
 User = get_user_model()
+logger = logging.getLogger(__name__)
 
 # Initialize Africa's Talking SMS service
 africastalking.initialize(
@@ -65,14 +67,22 @@ def normalize_phone(phone: str) -> str:
     return phone
 
 def calculate_covered_months(start_date: date, amount: Decimal, monthly_rent: Decimal, end_date: date):
-    """Reuse existing rent-coverage logic — exact same math, no changes."""
+    """Compute which month(s) a rent payment covers, plus any advance remainder.
+
+    Walks forward month-by-month from the lease start date, subtracting one
+    month's rent each step until the amount is exhausted or the lease ends.
+    """
     covered = []
     remaining = amount
     current = start_date
     while remaining >= monthly_rent and current <= end_date:
         covered.append(current.strftime("%B %Y"))
         remaining -= monthly_rent
-        current = date(current.year + 1, 1, 1) if current.month == 12 else date(current.year, current.month + 1)
+        # Advance to the 1st of the next month (year rollover in December).
+        if current.month == 12:
+            current = date(current.year + 1, 1, 1)
+        else:
+            current = date(current.year, current.month + 1, 1)
     return covered, remaining
 
 
@@ -443,6 +453,17 @@ def available_properties(request):
     """Public listing of AVAILABLE properties — no login required."""
     properties = Property.objects.filter(status='AVAILABLE').order_by('-created_at')
     return Response(PropertySerializer(properties, many=True).data)
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def public_property_detail(request, property_id):
+    """Public detail view for a single property — no login required."""
+    try:
+        prop = Property.objects.get(pk=property_id)
+    except Property.DoesNotExist:
+        return Response({"error": "Property not found."}, status=status.HTTP_404_NOT_FOUND)
+    return Response(PropertySerializer(prop).data)
 
 
 @api_view(['POST'])
@@ -1173,8 +1194,13 @@ def payment_list_create(request):
     if tid and user.role in ['admin', 'landlord']:
         qs = qs.filter(lease__tenant_id=tid)
 
-    total_paid = sum(p.amount for p in qs.filter(status='COMPLETED')) or Decimal('0.00')
-    total_pending = sum(p.amount for p in qs.filter(status='PENDING')) or Decimal('0.00')
+    # Compute aggregates via SQL — never sum full model objects in Python.
+    totals = qs.aggregate(
+        total_paid=Sum('amount', filter=Q(status='COMPLETED')),
+        total_pending=Sum('amount', filter=Q(status='PENDING')),
+    )
+    total_paid = totals['total_paid'] or Decimal('0.00')
+    total_pending = totals['total_pending'] or Decimal('0.00')
     mr = qs.first().lease.monthly_rent if qs.exists() else Decimal('0.00')
     bal = max(Decimal('0.00'), mr - total_paid)
     cm = f"Owe KSh {bal:.2f}. Clear before paying new months." if bal > 0 else "All up to date!"
@@ -1292,6 +1318,20 @@ def verify_payment(request, payment_id):
         payment.receipt_issued_at = timezone.now()
         payment.covered_months = covered
         payment.balance_after_payment = remaining
+        # Set issuer: explicit input first, else the LANDLORD's name (the official
+        # issuer of the receipt), else the logged-in user's name, else username.
+        # The landlord is the owner of the property linked to this lease.
+        landlord_name = None
+        try:
+            landlord_name = lease.property.landlord.full_name or lease.property.landlord.business_name
+        except Exception:
+            landlord_name = None
+        payment.issued_by = request.data.get('issued_by') or (
+            landlord_name or
+            getattr(u, 'full_name', None) or
+            (u.landlord_profile.full_name if hasattr(u, 'landlord_profile') and u.landlord_profile.full_name else None) or
+            u.username
+        )
         payment.save()
         return Response({
             "message": "Verified",
@@ -1367,12 +1407,29 @@ def mpesa_stk_push(request):
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def mpesa_callback(request):
-    """Safaricom callback — receives STK result and updates payment status."""
+    """Safaricom callback — receives STK result and updates payment status.
+
+    NOTE: Safaricom callbacks cannot carry a JWT. For production, protect this
+    endpoint by:
+      - verifying the request comes from Safaricom's IP ranges (via the proxy /
+        firewall), and/or
+      - using the C2B/STK confirmation endpoints offered by Safaricom that
+        include an initiator password.
+    A forged callback can only mark a PENDING payment as COMPLETED/FAILED —
+    it cannot create money, but you should still gate this endpoint in prod.
+    """
     data = request.data
     stk = data.get('Body', {}).get('stkCallback', {})
     cid = stk.get('CheckoutRequestID')
     rc = stk.get('ResultCode')
     if not cid:
+        # Malformed callback — log it instead of silently acking.
+        logger.warning("M-Pesa callback with missing CheckoutRequestID: %s", data)
+        return Response({"received": True})
+
+    # ResultCode must be present; Safaricom sends an integer.
+    if rc is None:
+        logger.warning("M-Pesa callback missing ResultCode for %s", cid)
         return Response({"received": True})
 
     try:
@@ -1394,10 +1451,18 @@ def mpesa_callback(request):
         covered, remaining = calculate_covered_months(lease.start_date, amt, mr, lease.end_date)
         payment.covered_months = covered
         payment.balance_after_payment = remaining
+        # Explicitly set the issuer so the receipt always shows WHO issued it.
+        # The LANDLORD is the official issuer of the receipt — never the tenant.
+        if not payment.issued_by:
+            try:
+                landlord = lease.property.landlord if lease and lease.property else None
+                payment.issued_by = (landlord.full_name or landlord.business_name or 'M-Pesa') if landlord else 'M-Pesa'
+            except Exception:
+                payment.issued_by = 'M-Pesa'
         payment.full_clean()
         payment.save(update_fields=[
             'status', 'transaction_id', 'receipt_issued_at', 'receipt_number',
-            'covered_months', 'balance_after_payment'
+            'covered_months', 'balance_after_payment', 'issued_by'
         ])
 
         try:
@@ -1445,6 +1510,7 @@ def payment_receipt(request, payment_id):
         "receipt": {
             "receipt_number": payment.receipt_number,
             "issued_at": payment.receipt_issued_at,
+            "issued_by": payment.issued_by,
             "tenant": l.tenant.full_name,
             "property": l.property.title,
             "amount_paid": f"{payment.amount:.2f}",
@@ -1500,14 +1566,50 @@ def admin_dashboard_stats(request):
     })
 
 
+def _paginate_queryset(qs, request, default_page_size=50, max_page_size=200):
+    """
+    Lightweight limit/offset pagination helper.
+
+    Reads `?page=N` (1-based) and `?page_size=M` (or `?limit=` / `?offset=`)
+    from the request query params. Returns (page_qs, meta_dict).
+    """
+    try:
+        page_size = int(request.query_params.get('page_size', request.query_params.get('limit', default_page_size)))
+    except (TypeError, ValueError):
+        page_size = default_page_size
+    page_size = max(1, min(page_size, max_page_size))
+
+    try:
+        page = int(request.query_params.get('page', 1))
+    except (TypeError, ValueError):
+        page = 1
+    page = max(1, page)
+
+    total = qs.count()
+    start = (page - 1) * page_size
+    end = start + page_size
+    page_qs = qs[start:end]
+
+    meta = {
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": (total + page_size - 1) // page_size,
+    }
+    return page_qs, meta
+
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def admin_all_users(request):
-    """Returns full list of all system users. Admin only."""
+    """Returns paginated list of all system users. Admin only."""
     if request.user.role != 'admin':
         return Response({"error": "Admin access required"}, status=status.HTTP_403_FORBIDDEN)
 
-    users = User.objects.all().order_by('-date_joined')
+    users_qs = User.objects.all().order_by('-date_joined')
+    users_qs, meta = _paginate_queryset(users_qs, request)
+    users = list(users_qs)
+
     data = [{
         "id": u.id,
         "email": u.email,
@@ -1523,4 +1625,4 @@ def admin_all_users(request):
         "profile_picture": u.profile_picture.url if u.profile_picture else None,
     } for u in users]
 
-    return Response({"users": data})
+    return Response({"users": data, "meta": meta})

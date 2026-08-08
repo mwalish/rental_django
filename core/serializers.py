@@ -296,8 +296,26 @@ class LeaseSerializer(serializers.ModelSerializer):
         read_only_fields = ["id", "created_at", "updated_at", "property_title", "tenant_name", "landlord_name"]
 
     def validate(self, data):
-        if data.get('end_date') and data.get('start_date') and data['end_date'] <= data['start_date']:
+        from datetime import date as _date_import
+
+        # Resolve dates: use incoming values, or fall back to existing instance values
+        # for partial updates (so editing unrelated fields still validates correctly).
+        start = data.get('start_date') or (getattr(self.instance, 'start_date', None) if self.instance else None)
+        end = data.get('end_date') or (getattr(self.instance, 'end_date', None) if self.instance else None)
+
+        if not start:
+            raise serializers.ValidationError({"start_date": "Start date is required."})
+        if not end:
+            raise serializers.ValidationError({"end_date": "End date is required."})
+
+        # Enforce end date strictly after start date.
+        if end <= start:
             raise serializers.ValidationError({"end_date": "End date must be later than start date."})
+
+        # On CREATE only, reject a start date in the past.
+        if not self.instance and start < _date_import.today():
+            raise serializers.ValidationError({"start_date": "Start date cannot be in the past."})
+
         return data
 
 
@@ -358,7 +376,7 @@ class PaymentSerializer(serializers.ModelSerializer):
         read_only_fields = [
             "id", "payment_date", "created_at", "updated_at",
             "property_title", "tenant_name", "landlord_name", "lease_monthly_rent", "covers_months",
-            "receipt_number", "receipt_issued_at", "balance_after_payment"
+            "receipt_number", "receipt_issued_at", "issued_by", "balance_after_payment"
         ]
 
     def get_covers_months(self, obj):
@@ -400,4 +418,3 @@ class PaymentSerializer(serializers.ModelSerializer):
                 "current_balance_due": f"{outstanding:.2f}"
             })
         return data
-

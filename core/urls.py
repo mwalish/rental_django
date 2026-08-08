@@ -46,6 +46,7 @@ urlpatterns = [
     path('rental-requests/<int:request_id>/', views.rental_request_detail, name='rental-request-detail'),
     path('rental-requests/<int:request_id>/convert-to-tenant/', views.admin_convert_rental_request, name='admin-request-convert-to-tenant'),
     path('properties/available/', views.available_properties, name='available-properties'),
+    path('properties/<int:property_id>/', views.public_property_detail, name='public-property-detail'),
 
     # ==============================================
     # Meeting / Viewing Scheduling
