@@ -238,21 +238,29 @@ python manage.py createsuperuser
 
 ## 7. Configure the alwaysdata site (the CRITICAL form fields)
 
-> ### ⚠️ CRITICAL — use **RELATIVE** paths (this caused your `chdir()` error)
+> ### ⚠️ CRITICAL — the **Application path** must point to the `wsgi.py` FILE
 >
-> alwaysdata already starts from `/home/lexnul/`. The **Application path** and
-> **Working directory** must be **relative** to `/home/lexnul/`.
-> If you enter the full `/home/lexnul/www/rental_django/`, alwaysdata doubles
-> it to `/home/lexnul/home/lexnul/www/rental_django/` and uWSGI fails with:
+> This is the #1 cause of **"Connection to upstream failed"** on alwaysdata.
+> uWSGI's **Application path** must be the **`wsgi.py` module file**, NOT the
+> directory. If you point it at the directory, uWSGI treats it as a Python
+> *package* and hunts for `__init__.py`, which fails with:
+> ```
+> open("/home/lexnul/www/rental_django//__init__.py"): No such file or directory
+> unable to load app 0 (mountpoint='') (callable not found or import error)
+> ```
+>
+> ❌ WRONG: `Application path = www/rental_django/`  ← looks for __init__.py → fails
+> ✅ CORRECT: `Application path = www/rental_django/wsgi.py`
+>
+> Also use **relative** paths (no leading `/home/lexnul/`), because alwaysdata
+> already starts from `/home/lexnul/`. If you enter the full absolute path,
+> alwaysdata doubles it (`/home/lexnul/home/lexnul/...`) and uWSGI fails with:
 > `chdir(): No such file or directory`.
->
-> ❌ WRONG: `Application path = /home/lexnul/www/rental_django/`
-> ✅ CORRECT: `Application path = www/rental_django/`
 
 **Steps:**
 1. Go to **Web → Sites → your site** (`lexnul.alwaysdata.net`).
 2. Set **Type** to **Python WSGI**.
-3. Set **Application path** to `www/rental_django/` (⚠️ relative).
+3. Set **Application path** to `www/rental_django/wsgi.py` ⚠️ (the **file**, relative).
 4. Set **Working directory** to `www/rental_django/` (⚠️ relative).
 5. Set **Python version** to the same version your venv was built with.
 6. Set **virtualenv directory** to `www/rental_django/venv` (⚠️ relative).
@@ -269,7 +277,7 @@ python manage.py createsuperuser
 | Field | Value (RELATIVE — no leading `/home/lexnul/`) |
 |---|---|
 | **Type** | Python WSGI |
-| **Application path** | `www/rental_django/` |
+| **Application path** | `www/rental_django/wsgi.py` ⚠️ (the FILE) |
 | **Working directory** | `www/rental_django/` |
 | **Python version** | e.g. `3.12` (match your venv) |
 | **Virtualenv directory** | `www/rental_django/venv` |
@@ -277,6 +285,8 @@ python manage.py createsuperuser
 | **Addresses** | `lexnul.alwaysdata.net` |
 
 > Replace `www/rental_django/` with your actual folder name under `www/`.
+> The **root-level** `wsgi.py` (next to `manage.py`) is the file to point to —
+> it sets `DJANGO_SETTINGS_MODULE=rental.settings`.
 
 ---
 
@@ -354,8 +364,17 @@ The settings already auto-enable secure cookies, HSTS, `X-Frame-Options`,
 ## 12. Troubleshooting (read this before panicking)
 
 ### A. `chdir(): No such file or directory` (uWSGI fails to start)
-**Cause:** You entered **absolute** paths (`/home/lexnul/...`) in the site form.
+**Cause:** You used an **absolute** path (`/home/lexnul/...`) in the Application
+path or Working directory. alwaysdata doubles it to `/home/lexnul/home/lexnul/...`.
 **Fix:** Use **relative** paths (`www/rental_django/`). See Step 7.
+
+### A1. `unable to load app 0` / `open("...//__init__.py"): No such file` /
+### `callable not found or import error` (uWSGI fails to start)
+**Cause:** The **Application path** points at a **directory**, so uWSGI treats it
+as a Python package and hunts for `__init__.py` at the project root.
+**Fix:** Point the **Application path** at the **`wsgi.py` file**, e.g.
+`www/rental_django/wsgi.py` (relative). This is the #1 cause of
+**"Connection to upstream failed: connection failure"**. See Step 7.
 
 ### A2. `502 Bad Gateway` / `upstream prematurely closed connection` / `connection upstream`
 These all mean the alwaysdata web server could not reach **or** get a response
